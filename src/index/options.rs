@@ -5,10 +5,95 @@ use pgrx::{pg_guard, pg_sys, GucContext, GucFlags, GucRegistry};
 
 use crate::hnsw_constants::*;
 
+// ---------------------------------------------------------------------------
+// Iterative scan mode enum for GUC
+// ---------------------------------------------------------------------------
+
+/// Iterative scan modes for HNSW search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HnswIterativeScan {
+    /// Iterative scan disabled.
+    Off = HNSW_ITERATIVE_SCAN_OFF as isize,
+    /// Relaxed ordering mode.
+    RelaxedOrder = HNSW_ITERATIVE_SCAN_RELAXED as isize,
+    /// Strict ordering mode.
+    StrictOrder = HNSW_ITERATIVE_SCAN_STRICT as isize,
+}
+
+/// Wrapper to safely share `config_enum_entry` arrays across threads.
+///
+/// SAFETY: The wrapped array contains only static string pointers and integer
+/// values, which are never mutated after initialization.
+struct SyncEnumEntries([pg_sys::config_enum_entry; 4]);
+unsafe impl Sync for SyncEnumEntries {}
+
+/// config_enum_entry array for `hnsw.iterative_scan`.
+static HNSW_ITERATIVE_SCAN_OPTIONS: SyncEnumEntries = SyncEnumEntries([
+    pg_sys::config_enum_entry {
+        name: c"off".as_ptr(),
+        val: HNSW_ITERATIVE_SCAN_OFF,
+        hidden: false,
+    },
+    pg_sys::config_enum_entry {
+        name: c"relaxed_order".as_ptr(),
+        val: HNSW_ITERATIVE_SCAN_RELAXED,
+        hidden: false,
+    },
+    pg_sys::config_enum_entry {
+        name: c"strict_order".as_ptr(),
+        val: HNSW_ITERATIVE_SCAN_STRICT,
+        hidden: false,
+    },
+    // Sentinel entry
+    pg_sys::config_enum_entry {
+        name: std::ptr::null(),
+        val: 0,
+        hidden: false,
+    },
+]);
+
+// SAFETY: The CONFIG_ENUM_ENTRY points to a valid static array with a
+// null-terminated sentinel. The enum values match the ordinals exactly.
+unsafe impl pgrx::GucEnum for HnswIterativeScan {
+    fn from_ordinal(ordinal: i32) -> Self {
+        match ordinal {
+            HNSW_ITERATIVE_SCAN_OFF => HnswIterativeScan::Off,
+            HNSW_ITERATIVE_SCAN_RELAXED => HnswIterativeScan::RelaxedOrder,
+            HNSW_ITERATIVE_SCAN_STRICT => HnswIterativeScan::StrictOrder,
+            _ => HnswIterativeScan::Off,
+        }
+    }
+
+    fn to_ordinal(&self) -> i32 {
+        *self as i32
+    }
+
+    const CONFIG_ENUM_ENTRY: *const pg_sys::config_enum_entry =
+        HNSW_ITERATIVE_SCAN_OPTIONS.0.as_ptr();
+}
+
+// ---------------------------------------------------------------------------
+// GUC variables
+// ---------------------------------------------------------------------------
+
 /// GUC variable: `hnsw.ef_search` controls the size of the dynamic
 /// candidate list during search. Valid range: 1..1000.
 pub static HNSW_EF_SEARCH: pgrx::GucSetting<i32> =
     pgrx::GucSetting::<i32>::new(HNSW_DEFAULT_EF_SEARCH);
+
+/// GUC variable: `hnsw.iterative_scan` controls the iterative scan mode.
+pub static HNSW_ITERATIVE_SCAN: pgrx::GucSetting<HnswIterativeScan> =
+    pgrx::GucSetting::<HnswIterativeScan>::new(HnswIterativeScan::Off);
+
+/// GUC variable: `hnsw.max_scan_tuples` sets the max number of tuples
+/// to visit for iterative scans. Valid range: 1..INT_MAX.
+pub static HNSW_MAX_SCAN_TUPLES: pgrx::GucSetting<i32> =
+    pgrx::GucSetting::<i32>::new(HNSW_DEFAULT_MAX_SCAN_TUPLES);
+
+/// GUC variable: `hnsw.scan_mem_multiplier` sets the multiple of
+/// work_mem to use for iterative scans. Valid range: 1..1000.
+pub static HNSW_SCAN_MEM_MULTIPLIER: pgrx::GucSetting<f64> =
+    pgrx::GucSetting::<f64>::new(HNSW_DEFAULT_SCAN_MEM_MULTIPLIER);
 
 /// Custom relopt_kind for HNSW index options.
 ///
@@ -76,6 +161,37 @@ pub fn init_gucs() {
         &HNSW_EF_SEARCH,
         HNSW_MIN_EF_SEARCH,
         HNSW_MAX_EF_SEARCH,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_enum_guc(
+        c"hnsw.iterative_scan",
+        c"Sets the mode for iterative scans.",
+        c"",
+        &HNSW_ITERATIVE_SCAN,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        c"hnsw.max_scan_tuples",
+        c"Sets the max number of tuples to visit for iterative scans.",
+        c"",
+        &HNSW_MAX_SCAN_TUPLES,
+        1,
+        i32::MAX,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_float_guc(
+        c"hnsw.scan_mem_multiplier",
+        c"Sets the multiple of work_mem to use for iterative scans.",
+        c"",
+        &HNSW_SCAN_MEM_MULTIPLIER,
+        1.0,
+        1000.0,
         GucContext::Userset,
         GucFlags::default(),
     );
@@ -176,5 +292,68 @@ mod tests {
             .expect("SPI failed")
             .expect("NULL result");
         assert_eq!(result, "1000");
+    }
+
+    #[pg_test]
+    fn test_iterative_scan_guc_default() {
+        let result = Spi::get_one::<String>("SHOW hnsw.iterative_scan")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, "off");
+    }
+
+    #[pg_test]
+    fn test_iterative_scan_guc_set() {
+        Spi::run("SET hnsw.iterative_scan = relaxed_order").expect("SET relaxed_order failed");
+        let result = Spi::get_one::<String>("SHOW hnsw.iterative_scan")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, "relaxed_order");
+
+        Spi::run("SET hnsw.iterative_scan = strict_order").expect("SET strict_order failed");
+        let result = Spi::get_one::<String>("SHOW hnsw.iterative_scan")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, "strict_order");
+
+        Spi::run("SET hnsw.iterative_scan = off").expect("SET off failed");
+        let result = Spi::get_one::<String>("SHOW hnsw.iterative_scan")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, "off");
+    }
+
+    #[pg_test]
+    fn test_max_scan_tuples_guc_default() {
+        let result = Spi::get_one::<String>("SHOW hnsw.max_scan_tuples")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, "20000");
+    }
+
+    #[pg_test]
+    fn test_max_scan_tuples_guc_set() {
+        Spi::run("SET hnsw.max_scan_tuples = 50000").expect("SET failed");
+        let result = Spi::get_one::<String>("SHOW hnsw.max_scan_tuples")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, "50000");
+    }
+
+    #[pg_test]
+    fn test_scan_mem_multiplier_guc_default() {
+        let result = Spi::get_one::<String>("SHOW hnsw.scan_mem_multiplier")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, "1");
+    }
+
+    #[pg_test]
+    fn test_scan_mem_multiplier_guc_set() {
+        Spi::run("SET hnsw.scan_mem_multiplier = 5").expect("SET failed");
+        let result = Spi::get_one::<String>("SHOW hnsw.scan_mem_multiplier")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, "5");
     }
 }

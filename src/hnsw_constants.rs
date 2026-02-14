@@ -92,6 +92,25 @@ pub const HNSW_UPDATE_ENTRY_GREATER: i32 = 1;
 /// Always update entry point.
 pub const HNSW_UPDATE_ENTRY_ALWAYS: i32 = 2;
 
+// --- Iterative scan modes ---
+
+/// Iterative scan: disabled.
+pub const HNSW_ITERATIVE_SCAN_OFF: i32 = 0;
+
+/// Iterative scan: relaxed ordering.
+pub const HNSW_ITERATIVE_SCAN_RELAXED: i32 = 1;
+
+/// Iterative scan: strict ordering.
+pub const HNSW_ITERATIVE_SCAN_STRICT: i32 = 2;
+
+// --- Iterative scan GUC defaults ---
+
+/// Default max scan tuples for iterative scans.
+pub const HNSW_DEFAULT_MAX_SCAN_TUPLES: i32 = 20000;
+
+/// Default scan memory multiplier for iterative scans.
+pub const HNSW_DEFAULT_SCAN_MEM_MULTIPLIER: f64 = 1.0;
+
 // --- Build phases ---
 
 /// Build phase: loading tuples.

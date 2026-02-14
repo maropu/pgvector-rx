@@ -667,6 +667,11 @@ pub unsafe extern "C-unwind" fn ambuild(
 ) -> *mut pg_sys::IndexBuildResult {
     let mut bs = HnswBuildState::new(index_relation);
 
+    // Validate ef_construction >= 2 * m (matches original pgvector check)
+    if bs.ef_construction < 2 * bs.m {
+        pgrx::error!("ef_construction must be greater than or equal to 2 * m");
+    }
+
     // Set up thread-local state for the distance function
     BUILD_STATE_PTR = Some(&mut bs as *mut HnswBuildState);
 
@@ -885,6 +890,19 @@ mod tests {
         Spi::run(
             "CREATE INDEX test_build7_idx ON test_build7 \
              USING hnsw (val vector_l2_ops)",
+        )
+        .unwrap();
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "ef_construction must be greater than or equal to 2 * m")]
+    fn test_hnsw_build_ef_construction_too_small() {
+        Spi::run("CREATE TABLE test_ef_check (id serial, val vector(3))").unwrap();
+        Spi::run("INSERT INTO test_ef_check (val) VALUES ('[1,0,0]')").unwrap();
+        // m=16 requires ef_construction >= 32, but 31 < 32
+        Spi::run(
+            "CREATE INDEX ON test_ef_check \
+             USING hnsw (val vector_l2_ops) WITH (m = 16, ef_construction = 31)",
         )
         .unwrap();
     }
