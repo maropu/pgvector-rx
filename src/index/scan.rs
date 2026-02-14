@@ -591,6 +591,8 @@ struct HnswScanState {
     tuples: i64,
     /// Previous distance returned (for strict_order mode).
     previous_distance: f64,
+    /// Current element being iterated (for multiple heap TIDs per element).
+    current_element: Option<ScanCandidate>,
 }
 
 // ---------------------------------------------------------------------------
@@ -637,6 +639,7 @@ pub unsafe extern "C-unwind" fn ambeginscan(
         iterative_initialized: false,
         tuples: 0,
         previous_distance: f64::NEG_INFINITY,
+        current_element: None,
     });
 
     (*scan).opaque = Box::into_raw(state) as *mut std::ffi::c_void;
@@ -661,6 +664,7 @@ pub unsafe extern "C-unwind" fn amrescan(
     so.iterative_initialized = false;
     so.tuples = 0;
     so.previous_distance = f64::NEG_INFINITY;
+    so.current_element = None;
 
     if !keys.is_null() && (*scan).numberOfKeys > 0 {
         std::ptr::copy_nonoverlapping(
@@ -767,6 +771,28 @@ pub unsafe extern "C-unwind" fn amgettuple(
 
     // Return next result
     loop {
+        // First, check if we have remaining heap TIDs from current element
+        if let Some(ref mut current) = so.current_element {
+            if !current.heaptids.is_empty() {
+                let heaptid = current.heaptids.pop().unwrap();
+
+                // Strict ordering check
+                if iterative_scan == HnswIterativeScan::StrictOrder {
+                    if current.distance < so.previous_distance {
+                        continue;
+                    }
+                    so.previous_distance = current.distance;
+                }
+
+                (*scan).xs_heaptid = heaptid;
+                (*scan).xs_recheck = false;
+                (*scan).xs_recheckorderby = false;
+                return true;
+            }
+            // All heap TIDs consumed, clear current element
+            so.current_element = None;
+        }
+
         if so.results.is_empty() {
             if iterative_scan == HnswIterativeScan::Off {
                 return false;
@@ -821,21 +847,10 @@ pub unsafe extern "C-unwind" fn amgettuple(
             continue;
         }
 
-        // Strict ordering: skip if distance is less than previous
-        if iterative_scan == HnswIterativeScan::StrictOrder {
-            if sc.distance < so.previous_distance {
-                continue;
-            }
-            so.previous_distance = sc.distance;
-        }
-
         so.tuples += 1;
 
-        // Return the first heap TID
-        (*scan).xs_heaptid = sc.heaptids[0];
-        (*scan).xs_recheck = false;
-        (*scan).xs_recheckorderby = false;
-        return true;
+        // Set as current element to iterate through all heap TIDs
+        so.current_element = Some(sc);
     }
 }
 

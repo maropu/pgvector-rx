@@ -122,8 +122,9 @@ struct HnswBuildState {
     elements: Vec<GraphElement>,
     /// Raw byte arena for vector values.
     values: Vec<u8>,
-    /// Heap TIDs for each element (parallel to `elements`).
-    heap_tids: Vec<pg_sys::ItemPointerData>,
+    /// Heap TIDs for each element (parallel to `elements`; up to
+    /// `HNSW_HEAPTIDS` per element for duplicate vectors).
+    heap_tids: Vec<Vec<pg_sys::ItemPointerData>>,
     /// Index of the current graph entry point, or `None`.
     entry_point: Option<usize>,
     /// Number of dimensions.
@@ -349,6 +350,35 @@ unsafe extern "C-unwind" fn build_callback(
             bs.m,
             HnswBuildState::distance_fn as DistanceFn,
         );
+
+        // Check for duplicate vectors among level-0 neighbors.
+        // If an identical vector is found with room for another heap TID,
+        // add this heap TID to the existing element instead of creating
+        // a new graph node.
+        let mut is_duplicate = false;
+        let neighbors_layer0 = &bs.elements[new_idx].neighbors[0];
+        for neighbor in &neighbors_layer0.items {
+            // Neighbors are ordered by distance; stop at first non-zero
+            if neighbor.distance != 0.0 {
+                break;
+            }
+            let dup_idx = neighbor.idx;
+            if bs.heap_tids[dup_idx].len() < HNSW_HEAPTIDS {
+                bs.heap_tids[dup_idx].push(*tid);
+                is_duplicate = true;
+                break;
+            }
+        }
+
+        if is_duplicate {
+            // Remove the newly added element (it was a duplicate)
+            bs.elements.pop();
+            // Reclaim the value bytes we just pushed
+            bs.values.truncate(value_offset);
+            bs.ind_tuples += 1.0;
+            return;
+        }
+
         update_neighbor_connections(
             &mut bs.elements,
             &bs.values,
@@ -367,7 +397,7 @@ unsafe extern "C-unwind" fn build_callback(
     }
 
     // Store heap TID for disk persistence
-    bs.heap_tids.push(*tid);
+    bs.heap_tids.push(vec![*tid]);
 
     bs.ind_tuples += 1.0;
 }
@@ -455,10 +485,14 @@ unsafe fn create_graph_pages(bs: &mut HnswBuildState) -> pg_sys::BlockNumber {
         (*etup).deleted = 0;
         (*etup).version = 0;
 
-        // Set heap TIDs — first one is the actual TID, rest are invalid
-        (*etup).heaptids[0] = bs.heap_tids[idx];
-        for i in 1..HNSW_HEAPTIDS {
-            pg_sys::ItemPointerSetInvalid(&mut (*etup).heaptids[i]);
+        // Set heap TIDs from the element's TID list
+        let elem_tids = &bs.heap_tids[idx];
+        for (i, tid_slot) in (*etup).heaptids.iter_mut().enumerate() {
+            if i < elem_tids.len() {
+                *tid_slot = elem_tids[i];
+            } else {
+                pg_sys::ItemPointerSetInvalid(tid_slot);
+            }
         }
 
         // Copy vector value data after the element tuple header

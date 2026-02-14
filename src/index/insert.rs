@@ -941,6 +941,97 @@ pub(crate) unsafe fn find_element_neighbors_on_disk(
 }
 
 // ---------------------------------------------------------------------------
+// Duplicate detection
+// ---------------------------------------------------------------------------
+
+/// Try to add a heap TID to an existing duplicate element on disk.
+///
+/// Returns `true` if the TID was added, `false` if the element has no room
+/// or is being deleted.
+///
+/// # Safety
+/// `index` must be a valid, open index relation.
+unsafe fn add_duplicate_on_disk(
+    index: pg_sys::Relation,
+    dup_blkno: pg_sys::BlockNumber,
+    dup_offno: pg_sys::OffsetNumber,
+    heap_tid: pg_sys::ItemPointer,
+) -> bool {
+    let buf = pg_sys::ReadBuffer(index, dup_blkno);
+    pg_sys::LockBuffer(buf, pg_sys::BUFFER_LOCK_EXCLUSIVE as i32);
+    let state = pg_sys::GenericXLogStart(index);
+    let page = pg_sys::GenericXLogRegisterBuffer(state, buf, 0);
+
+    let item_id = pg_sys::PageGetItemId(page, dup_offno);
+    let etup = pg_sys::PageGetItem(page, item_id) as *mut HnswElementTupleData;
+
+    // Find first invalid (empty) heap TID slot
+    let mut slot = HNSW_HEAPTIDS;
+    for i in 0..HNSW_HEAPTIDS {
+        if !pg_sys::ItemPointerIsValid(&(*etup).heaptids[i]) {
+            slot = i;
+            break;
+        }
+    }
+
+    // Either being deleted (slot 0 invalid) or all slots full
+    if slot == 0 || slot == HNSW_HEAPTIDS {
+        pg_sys::GenericXLogAbort(state);
+        pg_sys::UnlockReleaseBuffer(buf);
+        return false;
+    }
+
+    // Add heap TID to the element tuple on disk
+    (*etup).heaptids[slot] = *heap_tid;
+    pg_sys::GenericXLogFinish(state);
+    pg_sys::UnlockReleaseBuffer(buf);
+    true
+}
+
+/// Check level-0 neighbors for duplicate vectors and add the heap TID
+/// to the first matching element that has room.
+///
+/// Returns `true` if a duplicate was found and the TID was added.
+///
+/// # Safety
+/// `index` must be valid. `value_ptr` must point to valid vector data.
+unsafe fn find_duplicate_on_disk(
+    index: pg_sys::Relation,
+    layer0_neighbors: &[ScanCandidate],
+    value_ptr: *const u8,
+    value_size: usize,
+    heap_tid: pg_sys::ItemPointer,
+) -> bool {
+    for neighbor in layer0_neighbors {
+        // Neighbors are ordered by distance; stop at first non-zero distance
+        if neighbor.distance != 0.0 {
+            break;
+        }
+
+        // Load neighbor's vector data and compare byte-for-byte
+        let buf = pg_sys::ReadBuffer(index, neighbor.blkno);
+        pg_sys::LockBuffer(buf, pg_sys::BUFFER_LOCK_SHARE as i32);
+        let page = buffer_get_page(buf);
+        let item_id = pg_sys::PageGetItemId(page, neighbor.offno);
+        let etup = pg_sys::PageGetItem(page, item_id) as *const HnswElementTupleData;
+
+        // Compare the full varlena data (includes header + float data)
+        let is_equal = {
+            let on_disk_ptr = (etup as *const u8).add(std::mem::size_of::<HnswElementTupleData>());
+            std::slice::from_raw_parts(on_disk_ptr, value_size)
+                == std::slice::from_raw_parts(value_ptr, value_size)
+        };
+
+        pg_sys::UnlockReleaseBuffer(buf);
+
+        if is_equal && add_duplicate_on_disk(index, neighbor.blkno, neighbor.offno, heap_tid) {
+            return true;
+        }
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
 // aminsert callback
 // ---------------------------------------------------------------------------
 
@@ -1057,9 +1148,25 @@ pub unsafe extern "C-unwind" fn aminsert(
         vec![Vec::new(); (new_level + 1) as usize]
     };
 
-    // Build element tuple
+    // Check for duplicate vectors among level-0 neighbors.
+    // If found, add heap TID to the existing element instead of creating
+    // a new graph node.
     let varlena_ptr = vec_ptr as *const u8;
     let varlena_size = (*(varlena_ptr as *const u32) >> 2) as usize;
+    if !neighbors_by_layer.is_empty()
+        && find_duplicate_on_disk(
+            index_relation,
+            &neighbors_by_layer[0],
+            varlena_ptr,
+            varlena_size,
+            heap_tid,
+        )
+    {
+        pg_sys::UnlockPage(index_relation, HNSW_UPDATE_LOCK, lockmode);
+        return false;
+    }
+
+    // Build element tuple
     let etup_size = hnsw_element_tuple_size(varlena_size);
     let ntup_size = hnsw_neighbor_tuple_size(new_level as usize, m as usize);
 
