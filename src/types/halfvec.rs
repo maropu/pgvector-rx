@@ -873,7 +873,7 @@ pub unsafe extern "C-unwind" fn hnsw_halfvec_support(
     // The normalize field stores a raw function pointer compatible with
     // DirectFunctionCall1Coll. We use the SQL-registered halfvec_l2_normalize.
     static TYPE_INFO: HnswTypeInfo = HnswTypeInfo {
-        max_dimensions: 32000, // HNSW_MAX_DIM * 2 (halfvec elements are 2 bytes)
+        max_dimensions: crate::hnsw_constants::HNSW_MAX_DIM * 2,
     };
 
     pg_sys::Datum::from(&TYPE_INFO as *const HnswTypeInfo as usize)

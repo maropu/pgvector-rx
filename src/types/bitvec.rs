@@ -167,6 +167,26 @@ pub unsafe extern "C-unwind" fn jaccard_distance(
 }
 
 // ---------------------------------------------------------------------------
+// HNSW support function
+// ---------------------------------------------------------------------------
+
+pg_fn_info!(hnsw_bit_support);
+
+/// Returns type info for bit vectors in HNSW indexes.
+///
+/// The maxDimensions for bit is HNSW_MAX_DIM * 32 = 64000 bits.
+#[no_mangle]
+#[pg_guard]
+pub unsafe extern "C-unwind" fn hnsw_bit_support(
+    _fcinfo: pg_sys::FunctionCallInfo,
+) -> pg_sys::Datum {
+    static TYPE_INFO: crate::types::halfvec::HnswTypeInfo = crate::types::halfvec::HnswTypeInfo {
+        max_dimensions: crate::hnsw_constants::HNSW_MAX_DIM * 32,
+    };
+    pg_sys::Datum::from(&TYPE_INFO as *const crate::types::halfvec::HnswTypeInfo as usize)
+}
+
+// ---------------------------------------------------------------------------
 // SQL definitions
 // ---------------------------------------------------------------------------
 
@@ -177,6 +197,9 @@ CREATE FUNCTION hamming_distance(bit, bit) RETURNS float8
     AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION jaccard_distance(bit, bit) RETURNS float8
+    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION hnsw_bit_support(internal) RETURNS internal
     AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- Distance operators
@@ -200,12 +223,14 @@ extension_sql!(
 CREATE OPERATOR CLASS bit_hamming_ops
     FOR TYPE bit USING hnsw AS
     OPERATOR 1 <~> (bit, bit) FOR ORDER BY float_ops,
-    FUNCTION 1 hamming_distance(bit, bit);
+    FUNCTION 1 hamming_distance(bit, bit),
+    FUNCTION 3 hnsw_bit_support(internal);
 
 CREATE OPERATOR CLASS bit_jaccard_ops
     FOR TYPE bit USING hnsw AS
     OPERATOR 1 <%> (bit, bit) FOR ORDER BY float_ops,
-    FUNCTION 1 jaccard_distance(bit, bit);
+    FUNCTION 1 jaccard_distance(bit, bit),
+    FUNCTION 3 hnsw_bit_support(internal);
 "#,
     name = "bitvec_hnsw_opclasses",
     requires = ["bitvec_distance_functions", hnsw_handler],

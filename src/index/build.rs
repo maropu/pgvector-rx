@@ -143,7 +143,7 @@ pub unsafe fn get_normalize_fn(index: pg_sys::Relation) -> NormalizeFn {
         let procinfo = pg_sys::index_getprocinfo(index, 1, HNSW_TYPE_INFO_PROC);
         let result = pg_sys::FunctionCall0Coll(procinfo, pg_sys::InvalidOid);
         let type_info = &*(result.value() as *const crate::types::halfvec::HnswTypeInfo);
-        if type_info.max_dimensions == 32000 {
+        if type_info.max_dimensions == crate::hnsw_constants::HNSW_MAX_DIM * 2 {
             // Halfvec type
             |v| {
                 crate::types::halfvec::halfvec_l2_normalize_raw(
@@ -207,6 +207,30 @@ pub unsafe fn get_check_value_fn(index: pg_sys::Relation) -> CheckValueFn {
         }
     } else {
         None
+    }
+}
+
+/// Get the maximum allowed dimensions for the indexed type.
+///
+/// Uses FUNCTION 3 (TYPE_INFO_PROC) if available, otherwise defaults
+/// to `HNSW_MAX_DIM` for the base vector type.
+///
+/// # Safety
+/// `index` must be a valid, open index relation.
+pub unsafe fn get_max_dimensions(index: pg_sys::Relation) -> i32 {
+    let has_support = (*index)
+        .rd_support
+        .add(HNSW_TYPE_INFO_PROC as usize - 1)
+        .read()
+        != pg_sys::InvalidOid;
+
+    if has_support {
+        let procinfo = pg_sys::index_getprocinfo(index, 1, HNSW_TYPE_INFO_PROC);
+        let result = pg_sys::FunctionCall0Coll(procinfo, pg_sys::InvalidOid);
+        let type_info = &*(result.value() as *const crate::types::halfvec::HnswTypeInfo);
+        type_info.max_dimensions
+    } else {
+        HNSW_MAX_DIM
     }
 }
 
@@ -824,6 +848,15 @@ pub unsafe extern "C-unwind" fn ambuild(
     // Require column to have dimensions
     if dimensions < 0 {
         pgrx::error!("column does not have dimensions");
+    }
+
+    // Check dimensions against type-specific maximum
+    let max_dimensions = get_max_dimensions(index_relation);
+    if dimensions > max_dimensions {
+        pgrx::error!(
+            "column cannot have more than {} dimensions for hnsw index",
+            max_dimensions
+        );
     }
 
     bs.dimensions = dimensions;
