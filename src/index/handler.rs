@@ -5,20 +5,22 @@ use pgrx::{pg_sys, PgBox};
 
 use super::build::{ambuild, ambuildempty};
 use super::insert::aminsert;
-use super::options::amoptions;
-use super::scan::{ambeginscan, amendscan, amgettuple, amrescan};
+use super::options::{amoptions, HNSW_EF_SEARCH};
+use super::scan::{ambeginscan, amendscan, amgettuple, amrescan, get_meta_page_info};
 use super::vacuum::{ambulkdelete, amvacuumcleanup};
+use crate::hnsw_constants::{hnsw_get_layer_m, hnsw_get_ml};
 
 /// Cost estimate for HNSW index scans.
 ///
-/// Returns infinity cost when no ORDER BY is present, preventing the planner
-/// from choosing the HNSW index for queries like `SELECT COUNT(*)`.
+/// Uses PostgreSQL's `genericcostestimate` as a base, then adjusts costs
+/// using HNSW-specific parameters (m, ef_search) to model the graph
+/// traversal cost. Returns infinity when no ORDER BY is present.
 #[pg_guard]
 #[allow(clippy::too_many_arguments)]
 unsafe extern "C-unwind" fn amcostestimate(
-    _root: *mut pg_sys::PlannerInfo,
+    root: *mut pg_sys::PlannerInfo,
     path: *mut pg_sys::IndexPath,
-    _loop_count: f64,
+    loop_count: f64,
     index_startup_cost: *mut pg_sys::Cost,
     index_total_cost: *mut pg_sys::Cost,
     index_selectivity: *mut pg_sys::Selectivity,
@@ -42,11 +44,59 @@ unsafe extern "C-unwind" fn amcostestimate(
         return;
     }
 
-    *index_startup_cost = 0.0;
-    *index_total_cost = 0.0;
-    *index_selectivity = 1.0;
-    *index_correlation = 0.0;
-    *index_pages = 0.0;
+    // SAFETY: zeroed GenericCosts struct, matching C's MemSet(&costs, 0, ...).
+    let mut costs: pg_sys::GenericCosts = std::mem::zeroed();
+
+    pg_sys::genericcostestimate(root, path, loop_count, &mut costs);
+
+    // Read m from the index meta page.
+    let index = pg_sys::index_open((*(*path).indexinfo).indexoid, pg_sys::NoLock as i32);
+    let (m, _, _, _) = get_meta_page_info(index);
+    pg_sys::index_close(index, pg_sys::NoLock as i32);
+
+    let ef_search = HNSW_EF_SEARCH.get() as f64;
+
+    // Estimate the ratio of tuples scanned during HNSW traversal.
+    let num_tuples = (*(*path).indexinfo).tuples;
+    let ratio = if num_tuples > 0.0 {
+        let scaling_factor = 0.55_f64;
+        let entry_level = (num_tuples.ln() * hnsw_get_ml(m)) as i32;
+        let layer0_tuples_max = hnsw_get_layer_m(m, 0) as f64 * ef_search;
+        let layer0_selectivity =
+            scaling_factor * num_tuples.ln() / ((m as f64).ln() * (1.0 + ef_search.ln()));
+
+        let r =
+            (entry_level as f64 * m as f64 + layer0_tuples_max * layer0_selectivity) / num_tuples;
+        r.min(1.0)
+    } else {
+        1.0
+    };
+
+    let mut spc_seq_page_cost: f64 = 0.0;
+    pg_sys::get_tablespace_page_costs(
+        (*(*path).indexinfo).reltablespace,
+        std::ptr::null_mut(),
+        &mut spc_seq_page_cost,
+    );
+
+    // Startup cost is the cost before returning the first row.
+    costs.indexStartupCost = costs.indexTotalCost * ratio;
+
+    // Adjust cost since TOAST is not included in seq scan cost.
+    let startup_pages = costs.numIndexPages * ratio;
+    if startup_pages > (*(*(*path).indexinfo).rel).pages as f64 && ratio < 0.5 {
+        // Change all page cost from random to sequential.
+        costs.indexStartupCost -= startup_pages * (costs.spc_random_page_cost - spc_seq_page_cost);
+        // Remove cost of extra pages.
+        costs.indexStartupCost -=
+            (startup_pages - (*(*(*path).indexinfo).rel).pages as f64) * spc_seq_page_cost;
+    }
+
+    *index_startup_cost = costs.indexStartupCost;
+    *index_total_cost = costs.indexTotalCost;
+    *index_selectivity = costs.indexSelectivity;
+    *index_correlation = costs.indexCorrelation;
+    *index_pages = costs.numIndexPages;
 }
 
 /// Validate operator class — always returns true for now.
