@@ -374,7 +374,7 @@ unsafe fn update_neighbor_on_disk(
 /// # Safety
 /// `index` must be valid.
 #[allow(clippy::too_many_arguments)]
-unsafe fn update_neighbors_on_disk(
+pub(crate) unsafe fn update_neighbors_on_disk(
     index: pg_sys::Relation,
     new_blkno: pg_sys::BlockNumber,
     new_offno: pg_sys::OffsetNumber,
@@ -429,11 +429,19 @@ unsafe fn update_neighbors_on_disk(
 
 /// Update the meta page entry point and/or insert page.
 ///
+/// `update_entry_mode`:
+/// - `0` = do not update entry point
+/// - `HNSW_UPDATE_ENTRY_GREATER` = update only if level > current
+/// - `HNSW_UPDATE_ENTRY_ALWAYS` = always overwrite entry point
+///
+/// If `entry_blkno` is `InvalidBlockNumber` with `HNSW_UPDATE_ENTRY_ALWAYS`,
+/// the entry point is cleared.
+///
 /// # Safety
 /// `index` must be valid.
-unsafe fn update_meta_page_for_insert(
+pub(crate) unsafe fn update_meta_page(
     index: pg_sys::Relation,
-    update_entry: bool,
+    update_entry_mode: i32,
     entry_blkno: pg_sys::BlockNumber,
     entry_offno: pg_sys::OffsetNumber,
     entry_level: i32,
@@ -451,7 +459,12 @@ unsafe fn update_meta_page_for_insert(
     let page = pg_sys::GenericXLogRegisterBuffer(state, buf, 0);
     let metap = hnsw_page_get_meta_mut(page);
 
-    if update_entry && entry_level as i16 > (*metap).entry_level {
+    let should_update = if update_entry_mode == HNSW_UPDATE_ENTRY_ALWAYS {
+        true
+    } else {
+        update_entry_mode == HNSW_UPDATE_ENTRY_GREATER && entry_level as i16 > (*metap).entry_level
+    };
+    if should_update {
         (*metap).entry_blkno = entry_blkno;
         (*metap).entry_offno = entry_offno;
         (*metap).entry_level = entry_level as i16;
@@ -476,7 +489,7 @@ unsafe fn update_meta_page_for_insert(
 /// # Safety
 /// All index/query state must be valid.
 #[allow(clippy::too_many_arguments)]
-unsafe fn find_element_neighbors_on_disk(
+pub(crate) unsafe fn find_element_neighbors_on_disk(
     index: pg_sys::Relation,
     query_datum: pg_sys::Datum,
     dist_fmgr: *mut pg_sys::FmgrInfo,
@@ -771,10 +784,15 @@ pub unsafe extern "C-unwind" fn aminsert(
 
     // Update meta page if insert page changed or entry point needs updating
     let update_entry = entry_blkno == pg_sys::InvalidBlockNumber || new_level > entry_level;
+    let entry_mode = if update_entry {
+        HNSW_UPDATE_ENTRY_GREATER
+    } else {
+        0
+    };
     if update_entry || inserted.updated_insert_page != pg_sys::InvalidBlockNumber {
-        update_meta_page_for_insert(
+        update_meta_page(
             index_relation,
-            update_entry,
+            entry_mode,
             inserted.blkno,
             inserted.offno,
             new_level,
