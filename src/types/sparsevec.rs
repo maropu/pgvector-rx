@@ -1580,3 +1580,316 @@ CREATE OPERATOR CLASS sparsevec_l1_ops
     name = "sparsevec_hnsw_opclasses",
     requires = ["sparsevec_functions", hnsw_handler],
 );
+
+#[cfg(any(test, feature = "pg_test"))]
+#[pgrx::pg_schema]
+mod tests {
+    use pgrx::prelude::*;
+
+    // ----- Type I/O tests -----
+
+    #[pg_test]
+    fn test_sparsevec_type_exists() {
+        let result =
+            Spi::get_one::<String>("SELECT typname::text FROM pg_type WHERE typname = 'sparsevec'")
+                .expect("SPI failed")
+                .expect("sparsevec type not found");
+        assert_eq!(result, "sparsevec");
+    }
+
+    #[pg_test]
+    fn test_sparsevec_in_out_basic() {
+        let result = Spi::get_one::<String>("SELECT '{1:1,3:2}/5'::sparsevec::text")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, "{1:1,3:2}/5");
+    }
+
+    #[pg_test]
+    fn test_sparsevec_in_out_floats() {
+        let result = Spi::get_one::<String>("SELECT '{1:1.5,2:2.25}/3'::sparsevec::text")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, "{1:1.5,2:2.25}/3");
+    }
+
+    #[pg_test]
+    fn test_sparsevec_in_out_empty() {
+        let result = Spi::get_one::<String>("SELECT '{}/3'::sparsevec::text")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, "{}/3");
+    }
+
+    #[pg_test]
+    fn test_sparsevec_with_typmod() {
+        let result = Spi::get_one::<String>("SELECT '{1:1,3:2}/5'::sparsevec(5)::text")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, "{1:1,3:2}/5");
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "expected 5 dimensions, not 3")]
+    fn test_sparsevec_typmod_mismatch() {
+        Spi::get_one::<String>("SELECT '{1:1}/3'::sparsevec(5)::text").ok();
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "sparsevec must have at least 1 dimension")]
+    fn test_sparsevec_zero_dim() {
+        Spi::get_one::<String>("SELECT '{}/0'::sparsevec::text").ok();
+    }
+
+    #[pg_test]
+    fn test_sparsevec_in_table() {
+        Spi::run("CREATE TABLE test_sv (id serial, val sparsevec(5))").unwrap();
+        Spi::run("INSERT INTO test_sv (val) VALUES ('{1:1,3:2}/5'), ('{2:3.5}/5')").unwrap();
+        let count = Spi::get_one::<i64>("SELECT count(*) FROM test_sv")
+            .expect("SPI failed")
+            .expect("NULL count");
+        assert_eq!(count, 2);
+    }
+
+    #[pg_test]
+    fn test_sparsevec_null_insert() {
+        Spi::run("CREATE TABLE test_sv_null (id serial, val sparsevec(5))").unwrap();
+        Spi::run("INSERT INTO test_sv_null (val) VALUES (NULL)").unwrap();
+        let count = Spi::get_one::<i64>("SELECT count(*) FROM test_sv_null WHERE val IS NULL")
+            .expect("SPI failed")
+            .expect("NULL count");
+        assert_eq!(count, 1);
+    }
+
+    // ----- Distance function tests -----
+
+    #[pg_test]
+    fn test_sparsevec_l2_distance() {
+        let result =
+            Spi::get_one::<f64>("SELECT l2_distance('{1:3,2:4}/3'::sparsevec, '{}/3'::sparsevec)")
+                .expect("SPI failed")
+                .expect("NULL result");
+        assert!((result - 5.0).abs() < 1e-5);
+    }
+
+    #[pg_test]
+    fn test_sparsevec_l2_distance_same() {
+        let result = Spi::get_one::<f64>(
+            "SELECT l2_distance('{1:1,2:2}/3'::sparsevec, '{1:1,2:2}/3'::sparsevec)",
+        )
+        .expect("SPI failed")
+        .expect("NULL result");
+        assert!((result - 0.0).abs() < 1e-6);
+    }
+
+    #[pg_test]
+    fn test_sparsevec_inner_product() {
+        let result = Spi::get_one::<f64>(
+            "SELECT inner_product('{1:1,2:2,3:3}/3'::sparsevec, '{1:4,2:5,3:6}/3'::sparsevec)",
+        )
+        .expect("SPI failed")
+        .expect("NULL result");
+        // 1*4 + 2*5 + 3*6 = 32
+        assert!((result - 32.0).abs() < 1e-5);
+    }
+
+    #[pg_test]
+    fn test_sparsevec_cosine_distance_identical() {
+        let result = Spi::get_one::<f64>(
+            "SELECT cosine_distance('{1:1,2:2}/3'::sparsevec, '{1:1,2:2}/3'::sparsevec)",
+        )
+        .expect("SPI failed")
+        .expect("NULL result");
+        assert!((result - 0.0).abs() < 1e-6);
+    }
+
+    #[pg_test]
+    fn test_sparsevec_cosine_distance_orthogonal() {
+        let result = Spi::get_one::<f64>(
+            "SELECT cosine_distance('{1:1}/2'::sparsevec, '{2:1}/2'::sparsevec)",
+        )
+        .expect("SPI failed")
+        .expect("NULL result");
+        assert!((result - 1.0).abs() < 1e-6);
+    }
+
+    #[pg_test]
+    fn test_sparsevec_l1_distance() {
+        let result = Spi::get_one::<f64>(
+            "SELECT l1_distance('{1:1,2:2,3:3}/3'::sparsevec, '{1:4,2:5,3:6}/3'::sparsevec)",
+        )
+        .expect("SPI failed")
+        .expect("NULL result");
+        // |1-4| + |2-5| + |3-6| = 9
+        assert!((result - 9.0).abs() < 1e-5);
+    }
+
+    // ----- Operator tests -----
+
+    #[pg_test]
+    fn test_sparsevec_l2_operator() {
+        let result = Spi::get_one::<f64>("SELECT '{1:3,2:4}/3'::sparsevec <-> '{}/3'::sparsevec")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert!((result - 5.0).abs() < 1e-5);
+    }
+
+    #[pg_test]
+    fn test_sparsevec_ip_operator() {
+        let result = Spi::get_one::<f64>(
+            "SELECT '{1:1,2:2,3:3}/3'::sparsevec <#> '{1:4,2:5,3:6}/3'::sparsevec",
+        )
+        .expect("SPI failed")
+        .expect("NULL result");
+        // negative inner product = -32
+        assert!((result - (-32.0)).abs() < 1e-5);
+    }
+
+    #[pg_test]
+    fn test_sparsevec_cosine_operator() {
+        let result =
+            Spi::get_one::<f64>("SELECT '{1:1,2:2}/3'::sparsevec <=> '{1:1,2:2}/3'::sparsevec")
+                .expect("SPI failed")
+                .expect("NULL result");
+        assert!((result - 0.0).abs() < 1e-6);
+    }
+
+    #[pg_test]
+    fn test_sparsevec_l1_operator() {
+        let result = Spi::get_one::<f64>(
+            "SELECT '{1:1,2:2,3:3}/3'::sparsevec <+> '{1:4,2:5,3:6}/3'::sparsevec",
+        )
+        .expect("SPI failed")
+        .expect("NULL result");
+        assert!((result - 9.0).abs() < 1e-5);
+    }
+
+    // ----- Utility function tests -----
+
+    #[pg_test]
+    fn test_sparsevec_dims() {
+        let result = Spi::get_one::<i32>("SELECT vector_dims('{1:1,3:2}/5'::sparsevec)")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, 5);
+    }
+
+    #[pg_test]
+    fn test_sparsevec_l2_norm() {
+        let result = Spi::get_one::<f64>("SELECT l2_norm('{1:3,2:4}/3'::sparsevec)")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert!((result - 5.0).abs() < 1e-5);
+    }
+
+    #[pg_test]
+    fn test_sparsevec_l2_normalize() {
+        let result = Spi::get_one::<String>("SELECT l2_normalize('{1:3,2:4}/3'::sparsevec)::text")
+            .expect("SPI failed")
+            .expect("NULL result");
+        // 3/5=0.6, 4/5=0.8
+        assert!(result.contains("0.6"));
+        assert!(result.contains("0.8"));
+    }
+
+    // ----- Cast tests -----
+
+    #[pg_test]
+    fn test_vector_to_sparsevec_cast() {
+        let result = Spi::get_one::<String>("SELECT '[1,0,2]'::vector::sparsevec::text")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, "{1:1,3:2}/3");
+    }
+
+    #[pg_test]
+    fn test_sparsevec_to_vector_cast() {
+        let result = Spi::get_one::<String>("SELECT '{1:1,3:2}/3'::sparsevec::vector::text")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, "[1,0,2]");
+    }
+
+    #[pg_test]
+    fn test_halfvec_to_sparsevec_cast() {
+        let result = Spi::get_one::<String>("SELECT '[1,0,2]'::halfvec::sparsevec::text")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, "{1:1,3:2}/3");
+    }
+
+    #[pg_test]
+    fn test_sparsevec_to_halfvec_cast() {
+        let result = Spi::get_one::<String>("SELECT '{1:1,3:2}/3'::sparsevec::halfvec::text")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, "[1,0,2]");
+    }
+
+    // ----- HNSW index tests -----
+
+    #[pg_test]
+    fn test_sparsevec_hnsw_l2_index() {
+        Spi::run("CREATE TABLE test_sv_idx (id serial, val sparsevec(3))").unwrap();
+        Spi::run(
+            "INSERT INTO test_sv_idx (val) VALUES \
+             ('{1:1,2:2,3:3}/3'), ('{1:4,2:5,3:6}/3'), ('{1:7,2:8,3:9}/3')",
+        )
+        .unwrap();
+        Spi::run("CREATE INDEX ON test_sv_idx USING hnsw (val sparsevec_l2_ops)").unwrap();
+        let result = Spi::get_one::<i32>(
+            "SET enable_seqscan = off; \
+             SELECT id FROM test_sv_idx \
+             ORDER BY val <-> '{1:1,2:2,3:3}/3'::sparsevec LIMIT 1",
+        )
+        .expect("SPI failed")
+        .expect("NULL result");
+        assert_eq!(result, 1);
+    }
+
+    #[pg_test]
+    fn test_sparsevec_hnsw_cosine_index() {
+        Spi::run("CREATE TABLE test_sv_cos (id serial, val sparsevec(3))").unwrap();
+        Spi::run(
+            "INSERT INTO test_sv_cos (val) VALUES \
+             ('{1:1,2:0,3:0}/3'), ('{1:0,2:1,3:0}/3'), ('{1:0,2:0,3:1}/3')",
+        )
+        .unwrap();
+        Spi::run("CREATE INDEX ON test_sv_cos USING hnsw (val sparsevec_cosine_ops)").unwrap();
+        let result = Spi::get_one::<i32>(
+            "SET enable_seqscan = off; \
+             SELECT id FROM test_sv_cos \
+             ORDER BY val <=> '{1:1}/3'::sparsevec LIMIT 1",
+        )
+        .expect("SPI failed")
+        .expect("NULL result");
+        assert_eq!(result, 1);
+    }
+
+    // ----- Comparison operator tests -----
+
+    #[pg_test]
+    fn test_sparsevec_lt() {
+        let result = Spi::get_one::<bool>("SELECT '{1:1}/3'::sparsevec < '{1:2}/3'::sparsevec")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert!(result);
+    }
+
+    #[pg_test]
+    fn test_sparsevec_gt() {
+        let result = Spi::get_one::<bool>("SELECT '{1:2}/3'::sparsevec > '{1:1}/3'::sparsevec")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert!(result);
+    }
+
+    #[pg_test]
+    fn test_sparsevec_eq() {
+        let result =
+            Spi::get_one::<bool>("SELECT '{1:1,3:2}/5'::sparsevec = '{1:1,3:2}/5'::sparsevec")
+                .expect("SPI failed")
+                .expect("NULL result");
+        assert!(result);
+    }
+}
