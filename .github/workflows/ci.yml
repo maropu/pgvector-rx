@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  test:
+    name: Test on PostgreSQL 18
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          libreadline-dev \
+          zlib1g-dev \
+          flex \
+          bison \
+          libxml2-dev \
+          libxslt-dev \
+          libssl-dev \
+          libxml2-utils \
+          xsltproc \
+          ccache \
+          pkg-config \
+          libicu-dev
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    
+    - name: Cache Rust dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+    
+    - name: Install cargo-pgrx
+      run: |
+        cargo install cargo-pgrx --locked --version 0.17.0
+    
+    - name: Cache pgrx PostgreSQL installation
+      uses: actions/cache@v4
+      with:
+        path: ~/.pgrx
+        key: ${{ runner.os }}-pgrx-pg18-0.17.0
+        restore-keys: |
+          ${{ runner.os }}-pgrx-pg18-
+    
+    - name: Initialize pgrx with PostgreSQL 18
+      run: |
+        cargo pgrx init --pg18 download
+    
+    - name: Build extension
+      run: |
+        cargo build --release --features pg18 --no-default-features
+    
+    - name: Run tests
+      run: |
+        cargo pgrx test pg18
+    
+    - name: Start PostgreSQL and test extension loading
+      run: |
+        # Start PostgreSQL in background
+        cargo pgrx start pg18
+        
+        # Wait for PostgreSQL to be ready
+        sleep 5
+        
+        # Install extension
+        cargo pgrx install --pg-config ~/.pgrx/18.2/pgrx-install/bin/pg_config
+        
+        # Test extension loading
+        ~/.pgrx/18.2/pgrx-install/bin/psql -p 28818 -d postgres -c "CREATE EXTENSION pgvector_rx;"
+        ~/.pgrx/18.2/pgrx-install/bin/psql -p 28818 -d postgres -c "SELECT hello_pgvector_rx();"
+        
+        # Stop PostgreSQL
+        cargo pgrx stop pg18
