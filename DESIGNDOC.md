@@ -4,6 +4,10 @@
 
 This document outlines the plan for migrating the HNSW (Hierarchical Navigable Small World) index implementation from C to Rust in the pgvector-rx project. The original pgvector extension supports two index types (HNSW and IVFFlat), but this project will focus exclusively on HNSW.
 
+### Scope
+
+**This implementation focuses on sequential HNSW index building. Parallel build support is explicitly out of scope and will not be implemented.**
+
 ### Final Goal
 
 **The ultimate goal of this project is to successfully port the HNSW implementation to Rust such that all HNSW-related tests from the original pgvector test suite pass.**
@@ -271,29 +275,7 @@ The C implementation depends heavily on PostgreSQL internals:
 
 ---
 
-### Phase 7: Parallel Build Support
-**Goal**: Add parallel index construction (optional for MVP)
-
-#### Tasks:
-1. **Parallel Coordination**
-   - Worker process management
-   - Shared memory setup
-   - Dynamic shared memory (DSM) integration
-
-2. **Work Distribution**
-   - Heap scanning parallelization
-   - Graph merging strategy
-
-3. **Synchronization**
-   - Lock coordination across workers
-   - Progress aggregation
-
-**Estimated complexity**: High (3-4 weeks)
-**Priority**: Low (can be deferred to post-MVP)
-
----
-
-### Phase 8: Testing and Optimization
+### Phase 7: Testing and Optimization
 **Goal**: Ensure correctness and performance
 
 #### Tasks:
@@ -339,22 +321,17 @@ The C implementation depends heavily on PostgreSQL internals:
 - **Solution**: Use pgrx's WAL support or implement custom WAL records
 - **Risk**: High - errors can cause data corruption
 
-### 4. Parallel Processing
-- **Challenge**: PostgreSQL's parallel infrastructure is C-centric
-- **Solution**: Use DSM and shared memory carefully; consider deferring parallel build
-- **Risk**: High - complex synchronization
-
-### 5. Pointer Abstractions
+### 4. Pointer Abstractions
 - **Challenge**: C code uses relative pointers for in-memory vs on-disk structures
 - **Solution**: Implement Rust enums or traits to abstract pointer types
 - **Risk**: Medium - affects performance and correctness
 
-### 6. Lock Management
+### 5. Lock Management
 - **Challenge**: Fine-grained locking for concurrent access
 - **Solution**: Use PostgreSQL's LWLock through pgrx
 - **Risk**: Medium - deadlocks or race conditions possible
 
-### 7. Memory Context Integration
+### 6. Memory Context Integration
 - **Challenge**: PostgreSQL's memory context system for automatic cleanup
 - **Solution**: Integrate with pgrx's memory context support
 - **Risk**: Low-Medium - memory leaks if done incorrectly
@@ -493,10 +470,10 @@ The project will be considered successful when the following criteria are met:
 | 4. Search | 4-5 | Critical |
 | 5. Insertion | 3-4 | Critical |
 | 6. Vacuum | 2-3 | High |
-| 7. Parallel Build | 3-4 | Low |
-| 8. Testing/Optimization | 4-5 | Critical |
-| **Total (MVP without Parallel)** | **22-29 weeks** | |
-| **Total (Full Implementation)** | **25-33 weeks** | |
+| 7. Testing/Optimization | 4-5 | Critical |
+| **Total Implementation** | **22-29 weeks** | |
+
+**Note**: Parallel build support is out of scope for this implementation.
 
 ## Complete Test Suite Reference
 
