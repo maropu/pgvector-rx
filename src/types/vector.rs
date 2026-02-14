@@ -364,6 +364,186 @@ pub unsafe extern "C-unwind" fn vector_cast(fcinfo: pg_sys::FunctionCallInfo) ->
 }
 
 // ---------------------------------------------------------------------------
+// Distance / utility helpers (pure Rust, no PostgreSQL dependency)
+// ---------------------------------------------------------------------------
+
+/// Ensure two vectors have the same dimensions.
+#[inline]
+unsafe fn check_dims(a: *const VectorHeader, b: *const VectorHeader) {
+    if (*a).dim != (*b).dim {
+        pgrx::error!("different vector dimensions {} and {}", (*a).dim, (*b).dim);
+    }
+}
+
+/// L2 squared distance: sum((a[i] - b[i])^2).
+#[inline]
+fn compute_l2_squared(dim: usize, ax: *const f32, bx: *const f32) -> f32 {
+    let mut distance: f32 = 0.0;
+    for i in 0..dim {
+        // SAFETY: caller guarantees valid pointers and dim.
+        let diff = unsafe { *ax.add(i) - *bx.add(i) };
+        distance += diff * diff;
+    }
+    distance
+}
+
+/// Inner product: sum(a[i] * b[i]).
+#[inline]
+fn compute_inner_product(dim: usize, ax: *const f32, bx: *const f32) -> f32 {
+    let mut distance: f32 = 0.0;
+    for i in 0..dim {
+        // SAFETY: caller guarantees valid pointers and dim.
+        distance += unsafe { *ax.add(i) * *bx.add(i) };
+    }
+    distance
+}
+
+/// Cosine similarity: dot(a,b) / sqrt(norm(a) * norm(b)).
+#[inline]
+fn compute_cosine_similarity(dim: usize, ax: *const f32, bx: *const f32) -> f64 {
+    let mut similarity: f32 = 0.0;
+    let mut norma: f32 = 0.0;
+    let mut normb: f32 = 0.0;
+    for i in 0..dim {
+        // SAFETY: caller guarantees valid pointers and dim.
+        unsafe {
+            let ai = *ax.add(i);
+            let bi = *bx.add(i);
+            similarity += ai * bi;
+            norma += ai * ai;
+            normb += bi * bi;
+        }
+    }
+    (similarity as f64) / ((norma as f64) * (normb as f64)).sqrt()
+}
+
+/// L1 distance: sum(|a[i] - b[i]|).
+#[inline]
+fn compute_l1_distance(dim: usize, ax: *const f32, bx: *const f32) -> f32 {
+    let mut distance: f32 = 0.0;
+    for i in 0..dim {
+        // SAFETY: caller guarantees valid pointers and dim.
+        distance += unsafe { (*ax.add(i) - *bx.add(i)).abs() };
+    }
+    distance
+}
+
+// ---------------------------------------------------------------------------
+// Distance / utility PostgreSQL functions
+// ---------------------------------------------------------------------------
+
+pg_fn_info!(l2_distance);
+pg_fn_info!(vector_l2_squared_distance);
+pg_fn_info!(inner_product);
+pg_fn_info!(vector_negative_inner_product);
+pg_fn_info!(cosine_distance);
+pg_fn_info!(l1_distance);
+pg_fn_info!(vector_dims);
+pg_fn_info!(vector_norm);
+
+/// L2 (Euclidean) distance between two vectors.
+#[no_mangle]
+#[pg_guard]
+pub unsafe extern "C-unwind" fn l2_distance(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum {
+    let a = pg_sys::pg_detoast_datum(fc_arg(fcinfo, 0).cast_mut_ptr()) as *const VectorHeader;
+    let b = pg_sys::pg_detoast_datum(fc_arg(fcinfo, 1).cast_mut_ptr()) as *const VectorHeader;
+    check_dims(a, b);
+    let dim = (*a).dim as usize;
+    let dist = (compute_l2_squared(dim, vector_data(a), vector_data(b)) as f64).sqrt();
+    pg_sys::Datum::from(f64::to_bits(dist))
+}
+
+/// L2 squared distance (avoids sqrt, used by HNSW operator class).
+#[no_mangle]
+#[pg_guard]
+pub unsafe extern "C-unwind" fn vector_l2_squared_distance(
+    fcinfo: pg_sys::FunctionCallInfo,
+) -> pg_sys::Datum {
+    let a = pg_sys::pg_detoast_datum(fc_arg(fcinfo, 0).cast_mut_ptr()) as *const VectorHeader;
+    let b = pg_sys::pg_detoast_datum(fc_arg(fcinfo, 1).cast_mut_ptr()) as *const VectorHeader;
+    check_dims(a, b);
+    let dim = (*a).dim as usize;
+    let dist = compute_l2_squared(dim, vector_data(a), vector_data(b)) as f64;
+    pg_sys::Datum::from(f64::to_bits(dist))
+}
+
+/// Inner product of two vectors.
+#[no_mangle]
+#[pg_guard]
+pub unsafe extern "C-unwind" fn inner_product(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum {
+    let a = pg_sys::pg_detoast_datum(fc_arg(fcinfo, 0).cast_mut_ptr()) as *const VectorHeader;
+    let b = pg_sys::pg_detoast_datum(fc_arg(fcinfo, 1).cast_mut_ptr()) as *const VectorHeader;
+    check_dims(a, b);
+    let dim = (*a).dim as usize;
+    let dist = compute_inner_product(dim, vector_data(a), vector_data(b)) as f64;
+    pg_sys::Datum::from(f64::to_bits(dist))
+}
+
+/// Negative inner product (used by HNSW operator class for IP distance).
+#[no_mangle]
+#[pg_guard]
+pub unsafe extern "C-unwind" fn vector_negative_inner_product(
+    fcinfo: pg_sys::FunctionCallInfo,
+) -> pg_sys::Datum {
+    let a = pg_sys::pg_detoast_datum(fc_arg(fcinfo, 0).cast_mut_ptr()) as *const VectorHeader;
+    let b = pg_sys::pg_detoast_datum(fc_arg(fcinfo, 1).cast_mut_ptr()) as *const VectorHeader;
+    check_dims(a, b);
+    let dim = (*a).dim as usize;
+    let dist = -(compute_inner_product(dim, vector_data(a), vector_data(b)) as f64);
+    pg_sys::Datum::from(f64::to_bits(dist))
+}
+
+/// Cosine distance: 1 - cosine_similarity(a, b).
+#[no_mangle]
+#[pg_guard]
+pub unsafe extern "C-unwind" fn cosine_distance(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum {
+    let a = pg_sys::pg_detoast_datum(fc_arg(fcinfo, 0).cast_mut_ptr()) as *const VectorHeader;
+    let b = pg_sys::pg_detoast_datum(fc_arg(fcinfo, 1).cast_mut_ptr()) as *const VectorHeader;
+    check_dims(a, b);
+    let dim = (*a).dim as usize;
+    let similarity = compute_cosine_similarity(dim, vector_data(a), vector_data(b));
+    // Clamp to [-1, 1] to handle floating point errors
+    let dist = 1.0 - similarity.clamp(-1.0, 1.0);
+    pg_sys::Datum::from(f64::to_bits(dist))
+}
+
+/// L1 (Manhattan) distance between two vectors.
+#[no_mangle]
+#[pg_guard]
+pub unsafe extern "C-unwind" fn l1_distance(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum {
+    let a = pg_sys::pg_detoast_datum(fc_arg(fcinfo, 0).cast_mut_ptr()) as *const VectorHeader;
+    let b = pg_sys::pg_detoast_datum(fc_arg(fcinfo, 1).cast_mut_ptr()) as *const VectorHeader;
+    check_dims(a, b);
+    let dim = (*a).dim as usize;
+    let dist = compute_l1_distance(dim, vector_data(a), vector_data(b)) as f64;
+    pg_sys::Datum::from(f64::to_bits(dist))
+}
+
+/// Get the number of dimensions of a vector.
+#[no_mangle]
+#[pg_guard]
+pub unsafe extern "C-unwind" fn vector_dims(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum {
+    let a = pg_sys::pg_detoast_datum(fc_arg(fcinfo, 0).cast_mut_ptr()) as *const VectorHeader;
+    pg_sys::Datum::from((*a).dim as i32)
+}
+
+/// Get the L2 norm of a vector.
+#[no_mangle]
+#[pg_guard]
+pub unsafe extern "C-unwind" fn vector_norm(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum {
+    let a = pg_sys::pg_detoast_datum(fc_arg(fcinfo, 0).cast_mut_ptr()) as *const VectorHeader;
+    let ax = vector_data(a);
+    let dim = (*a).dim as usize;
+    let mut norm: f64 = 0.0;
+    for i in 0..dim {
+        let v = *ax.add(i) as f64;
+        norm += v * v;
+    }
+    let result = norm.sqrt();
+    pg_sys::Datum::from(f64::to_bits(result))
+}
+
+// ---------------------------------------------------------------------------
 // SQL registration
 // ---------------------------------------------------------------------------
 
@@ -403,6 +583,87 @@ CREATE CAST (vector AS vector)
 "#,
     name = "vector_type_definition",
     bootstrap,
+);
+
+extension_sql!(
+    r#"
+-- Distance functions
+CREATE FUNCTION l2_distance(vector, vector) RETURNS float8
+    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vector_l2_squared_distance(vector, vector) RETURNS float8
+    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION inner_product(vector, vector) RETURNS float8
+    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vector_negative_inner_product(vector, vector) RETURNS float8
+    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION cosine_distance(vector, vector) RETURNS float8
+    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION l1_distance(vector, vector) RETURNS float8
+    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vector_dims(vector) RETURNS integer
+    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vector_norm(vector) RETURNS float8
+    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- Distance operators
+CREATE OPERATOR <-> (
+    LEFTARG = vector, RIGHTARG = vector, PROCEDURE = l2_distance,
+    COMMUTATOR = '<->'
+);
+
+CREATE OPERATOR <#> (
+    LEFTARG = vector, RIGHTARG = vector,
+    PROCEDURE = vector_negative_inner_product,
+    COMMUTATOR = '<#>'
+);
+
+CREATE OPERATOR <=> (
+    LEFTARG = vector, RIGHTARG = vector, PROCEDURE = cosine_distance,
+    COMMUTATOR = '<=>'
+);
+
+CREATE OPERATOR <+> (
+    LEFTARG = vector, RIGHTARG = vector, PROCEDURE = l1_distance,
+    COMMUTATOR = '<+>'
+);
+"#,
+    name = "vector_distance_functions",
+    requires = ["vector_type_definition"],
+);
+
+extension_sql!(
+    r#"
+-- HNSW operator classes
+CREATE OPERATOR CLASS vector_l2_ops
+    FOR TYPE vector USING hnsw AS
+    OPERATOR 1 <-> (vector, vector) FOR ORDER BY float_ops,
+    FUNCTION 1 vector_l2_squared_distance(vector, vector);
+
+CREATE OPERATOR CLASS vector_ip_ops
+    FOR TYPE vector USING hnsw AS
+    OPERATOR 1 <#> (vector, vector) FOR ORDER BY float_ops,
+    FUNCTION 1 vector_negative_inner_product(vector, vector);
+
+CREATE OPERATOR CLASS vector_cosine_ops
+    FOR TYPE vector USING hnsw AS
+    OPERATOR 1 <=> (vector, vector) FOR ORDER BY float_ops,
+    FUNCTION 1 vector_negative_inner_product(vector, vector),
+    FUNCTION 2 vector_norm(vector);
+
+CREATE OPERATOR CLASS vector_l1_ops
+    FOR TYPE vector USING hnsw AS
+    OPERATOR 1 <+> (vector, vector) FOR ORDER BY float_ops,
+    FUNCTION 1 l1_distance(vector, vector);
+"#,
+    name = "vector_hnsw_opclasses",
+    requires = ["vector_distance_functions", hnsw_handler],
 );
 
 // ---------------------------------------------------------------------------
@@ -489,5 +750,165 @@ mod tests {
             .expect("SPI failed")
             .expect("NULL count");
         assert_eq!(count, 1);
+    }
+
+    // ----- Distance function tests -----
+
+    #[pg_test]
+    fn test_l2_distance() {
+        let result = Spi::get_one::<f64>("SELECT l2_distance('[0,0]'::vector, '[3,4]'::vector)")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert!((result - 5.0).abs() < 1e-6);
+    }
+
+    #[pg_test]
+    fn test_l2_distance_same() {
+        let result =
+            Spi::get_one::<f64>("SELECT l2_distance('[1,2,3]'::vector, '[1,2,3]'::vector)")
+                .expect("SPI failed")
+                .expect("NULL result");
+        assert!((result - 0.0).abs() < 1e-6);
+    }
+
+    #[pg_test]
+    fn test_inner_product() {
+        let result =
+            Spi::get_one::<f64>("SELECT inner_product('[1,2,3]'::vector, '[4,5,6]'::vector)")
+                .expect("SPI failed")
+                .expect("NULL result");
+        // 1*4 + 2*5 + 3*6 = 32
+        assert!((result - 32.0).abs() < 1e-6);
+    }
+
+    #[pg_test]
+    fn test_cosine_distance_identical() {
+        let result =
+            Spi::get_one::<f64>("SELECT cosine_distance('[1,2,3]'::vector, '[1,2,3]'::vector)")
+                .expect("SPI failed")
+                .expect("NULL result");
+        assert!((result - 0.0).abs() < 1e-6);
+    }
+
+    #[pg_test]
+    fn test_cosine_distance_orthogonal() {
+        let result =
+            Spi::get_one::<f64>("SELECT cosine_distance('[1,0]'::vector, '[0,1]'::vector)")
+                .expect("SPI failed")
+                .expect("NULL result");
+        assert!((result - 1.0).abs() < 1e-6);
+    }
+
+    #[pg_test]
+    fn test_l1_distance() {
+        let result =
+            Spi::get_one::<f64>("SELECT l1_distance('[1,2,3]'::vector, '[4,6,8]'::vector)")
+                .expect("SPI failed")
+                .expect("NULL result");
+        // |1-4| + |2-6| + |3-8| = 3 + 4 + 5 = 12
+        assert!((result - 12.0).abs() < 1e-6);
+    }
+
+    #[pg_test]
+    fn test_vector_dims_fn() {
+        let result = Spi::get_one::<i32>("SELECT vector_dims('[1,2,3,4,5]'::vector)")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, 5);
+    }
+
+    #[pg_test]
+    fn test_vector_norm() {
+        let result = Spi::get_one::<f64>("SELECT vector_norm('[3,4]'::vector)")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert!((result - 5.0).abs() < 1e-6);
+    }
+
+    #[pg_test]
+    #[should_panic(expected = "different vector dimensions")]
+    fn test_l2_distance_dim_mismatch() {
+        Spi::get_one::<f64>("SELECT l2_distance('[1,2]'::vector, '[1,2,3]'::vector)").ok();
+    }
+
+    // ----- Operator tests -----
+
+    #[pg_test]
+    fn test_l2_operator() {
+        let result = Spi::get_one::<f64>("SELECT '[0,0]'::vector <-> '[3,4]'::vector")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert!((result - 5.0).abs() < 1e-6);
+    }
+
+    #[pg_test]
+    fn test_ip_operator() {
+        // <#> returns negative inner product
+        let result = Spi::get_one::<f64>("SELECT '[1,2,3]'::vector <#> '[4,5,6]'::vector")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert!((result - (-32.0)).abs() < 1e-6);
+    }
+
+    #[pg_test]
+    fn test_cosine_operator() {
+        let result = Spi::get_one::<f64>("SELECT '[1,0]'::vector <=> '[0,1]'::vector")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert!((result - 1.0).abs() < 1e-6);
+    }
+
+    #[pg_test]
+    fn test_l1_operator() {
+        let result = Spi::get_one::<f64>("SELECT '[1,2,3]'::vector <+> '[4,6,8]'::vector")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert!((result - 12.0).abs() < 1e-6);
+    }
+
+    // ----- Operator class tests -----
+
+    #[pg_test]
+    fn test_hnsw_opclass_l2_exists() {
+        let result = Spi::get_one::<String>(
+            "SELECT opcname::text FROM pg_opclass WHERE opcname = 'vector_l2_ops' \
+             AND opcmethod = (SELECT oid FROM pg_am WHERE amname = 'hnsw')",
+        )
+        .expect("SPI failed")
+        .expect("opclass not found");
+        assert_eq!(result, "vector_l2_ops");
+    }
+
+    #[pg_test]
+    fn test_hnsw_opclass_ip_exists() {
+        let result = Spi::get_one::<String>(
+            "SELECT opcname::text FROM pg_opclass WHERE opcname = 'vector_ip_ops' \
+             AND opcmethod = (SELECT oid FROM pg_am WHERE amname = 'hnsw')",
+        )
+        .expect("SPI failed")
+        .expect("opclass not found");
+        assert_eq!(result, "vector_ip_ops");
+    }
+
+    #[pg_test]
+    fn test_hnsw_opclass_cosine_exists() {
+        let result = Spi::get_one::<String>(
+            "SELECT opcname::text FROM pg_opclass WHERE opcname = 'vector_cosine_ops' \
+             AND opcmethod = (SELECT oid FROM pg_am WHERE amname = 'hnsw')",
+        )
+        .expect("SPI failed")
+        .expect("opclass not found");
+        assert_eq!(result, "vector_cosine_ops");
+    }
+
+    #[pg_test]
+    fn test_hnsw_opclass_l1_exists() {
+        let result = Spi::get_one::<String>(
+            "SELECT opcname::text FROM pg_opclass WHERE opcname = 'vector_l1_ops' \
+             AND opcmethod = (SELECT oid FROM pg_am WHERE amname = 'hnsw')",
+        )
+        .expect("SPI failed")
+        .expect("opclass not found");
+        assert_eq!(result, "vector_l1_ops");
     }
 }
