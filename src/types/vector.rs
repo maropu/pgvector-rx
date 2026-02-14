@@ -163,6 +163,8 @@ pg_fn_info!(vector_typmod_in);
 pg_fn_info!(vector_recv);
 pg_fn_info!(vector_send);
 pg_fn_info!(vector_cast);
+pg_fn_info!(array_to_vector);
+pg_fn_info!(vector_to_float4);
 
 /// Parse text `[1,2,3]` into a vector. Matches C's `vector_in`.
 #[no_mangle]
@@ -387,6 +389,116 @@ pub unsafe extern "C-unwind" fn vector_cast(fcinfo: pg_sys::FunctionCallInfo) ->
     check_expected_dim(typmod, (*vec).dim as i32);
 
     raw
+}
+
+/// Convert a PostgreSQL array (integer[], real[], double precision[], or
+/// numeric[]) to a vector. Matches C's `array_to_vector`.
+#[no_mangle]
+#[pg_guard]
+pub unsafe extern "C-unwind" fn array_to_vector(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum {
+    // SAFETY: DatumGetArrayTypeP is a C macro; replicate as pg_detoast_datum.
+    let array =
+        pg_sys::pg_detoast_datum(fc_arg(fcinfo, 0).cast_mut_ptr()) as *mut pg_sys::ArrayType;
+    let typmod = fc_arg(fcinfo, 1).value() as i32;
+
+    if (*array).ndim > 1 {
+        pgrx::error!("array must be 1-D");
+    }
+
+    if pg_sys::array_contains_nulls(array) {
+        pgrx::error!("array must not contain nulls");
+    }
+
+    let elem_type = (*array).elemtype;
+    let mut typlen: i16 = 0;
+    let mut typbyval: bool = false;
+    let mut typalign: i8 = 0;
+    pg_sys::get_typlenbyvalalign(elem_type, &mut typlen, &mut typbyval, &mut typalign);
+
+    let mut elems: *mut pg_sys::Datum = ptr::null_mut();
+    let mut nelems: i32 = 0;
+    pg_sys::deconstruct_array(
+        array,
+        elem_type,
+        typlen as i32,
+        typbyval,
+        typalign,
+        &mut elems,
+        ptr::null_mut(),
+        &mut nelems,
+    );
+
+    let dim = nelems;
+    check_dim(dim);
+    check_expected_dim(typmod, dim);
+
+    let result = init_vector(dim);
+    let rx = vector_data_mut(result);
+
+    if elem_type == pg_sys::INT4OID {
+        for i in 0..dim as usize {
+            *rx.add(i) = pg_sys::DatumGetInt32(*elems.add(i)) as f32;
+        }
+    } else if elem_type == pg_sys::FLOAT8OID {
+        for i in 0..dim as usize {
+            *rx.add(i) = pg_sys::DatumGetFloat8(*elems.add(i)) as f32;
+        }
+    } else if elem_type == pg_sys::FLOAT4OID {
+        for i in 0..dim as usize {
+            *rx.add(i) = pg_sys::DatumGetFloat4(*elems.add(i));
+        }
+    } else if elem_type == pg_sys::NUMERICOID {
+        for i in 0..dim as usize {
+            // SAFETY: Use OidFunctionCall to invoke numeric_float4 by OID.
+            *rx.add(i) = pg_sys::DatumGetFloat4(pg_sys::OidFunctionCall1Coll(
+                pg_sys::Oid::from_u32(pg_sys::F_NUMERIC_FLOAT4),
+                pg_sys::InvalidOid,
+                *elems.add(i),
+            ));
+        }
+    } else {
+        pgrx::error!("unsupported array type");
+    }
+
+    pg_sys::pfree(elems as *mut std::ffi::c_void);
+
+    for i in 0..dim as usize {
+        check_element(*rx.add(i));
+    }
+
+    pg_sys::Datum::from(result as usize)
+}
+
+/// Convert a vector to a float4[] array. Matches C's `vector_to_float4`.
+#[no_mangle]
+#[pg_guard]
+pub unsafe extern "C-unwind" fn vector_to_float4(
+    fcinfo: pg_sys::FunctionCallInfo,
+) -> pg_sys::Datum {
+    let raw = fc_arg(fcinfo, 0);
+    let vec = pg_sys::pg_detoast_datum(raw.cast_mut_ptr()) as *const VectorHeader;
+    let dim = (*vec).dim as usize;
+    let data = vector_data(vec);
+
+    let datums = pg_sys::palloc(dim * std::mem::size_of::<pg_sys::Datum>()) as *mut pg_sys::Datum;
+    for i in 0..dim {
+        *datums.add(i) = pg_sys::Float4GetDatum(*data.add(i));
+    }
+
+    // SAFETY: construct_array builds a valid PostgreSQL ArrayType.
+    // TYPALIGN_INT = 'i' = 105
+    let result = pg_sys::construct_array(
+        datums,
+        dim as i32,
+        pg_sys::FLOAT4OID,
+        std::mem::size_of::<f32>() as i32,
+        true,
+        105_i8, // TYPALIGN_INT = 'i'
+    );
+
+    pg_sys::pfree(datums as *mut std::ffi::c_void);
+
+    pg_sys::Datum::from(result as usize)
 }
 
 // ---------------------------------------------------------------------------
@@ -631,8 +743,38 @@ CREATE TYPE vector (
 CREATE FUNCTION vector_cast(vector, integer, boolean) RETURNS vector
     AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
+CREATE FUNCTION array_to_vector(integer[], integer, boolean) RETURNS vector
+    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION array_to_vector(real[], integer, boolean) RETURNS vector
+    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION array_to_vector(double precision[], integer, boolean) RETURNS vector
+    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION array_to_vector(numeric[], integer, boolean) RETURNS vector
+    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vector_to_float4(vector, integer, boolean) RETURNS real[]
+    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
 CREATE CAST (vector AS vector)
     WITH FUNCTION vector_cast(vector, integer, boolean) AS IMPLICIT;
+
+CREATE CAST (vector AS real[])
+    WITH FUNCTION vector_to_float4(vector, integer, boolean) AS IMPLICIT;
+
+CREATE CAST (integer[] AS vector)
+    WITH FUNCTION array_to_vector(integer[], integer, boolean) AS ASSIGNMENT;
+
+CREATE CAST (real[] AS vector)
+    WITH FUNCTION array_to_vector(real[], integer, boolean) AS ASSIGNMENT;
+
+CREATE CAST (double precision[] AS vector)
+    WITH FUNCTION array_to_vector(double precision[], integer, boolean) AS ASSIGNMENT;
+
+CREATE CAST (numeric[] AS vector)
+    WITH FUNCTION array_to_vector(numeric[], integer, boolean) AS ASSIGNMENT;
 "#,
     name = "vector_type_definition",
     bootstrap,
@@ -966,5 +1108,64 @@ mod tests {
         .expect("SPI failed")
         .expect("opclass not found");
         assert_eq!(result, "vector_l1_ops");
+    }
+
+    #[pg_test]
+    fn test_array_to_vector_float8() {
+        let result = Spi::get_one::<String>(
+            "SELECT (ARRAY[1.0, 2.0, 3.0]::double precision[])::vector::text",
+        )
+        .expect("SPI failed")
+        .expect("NULL result");
+        assert_eq!(result, "[1,2,3]");
+    }
+
+    #[pg_test]
+    fn test_array_to_vector_float4() {
+        let result = Spi::get_one::<String>("SELECT (ARRAY[1.5, 2.5, 3.5]::real[])::vector::text")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, "[1.5,2.5,3.5]");
+    }
+
+    #[pg_test]
+    fn test_array_to_vector_int4() {
+        let result = Spi::get_one::<String>("SELECT (ARRAY[1, 2, 3]::integer[])::vector::text")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, "[1,2,3]");
+    }
+
+    #[pg_test]
+    fn test_vector_to_float4() {
+        let result = Spi::get_one::<String>("SELECT ('[1,2,3]'::vector)::real[]::text")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(result, "{1,2,3}");
+    }
+
+    #[pg_test]
+    fn test_array_random_to_vector() {
+        // This is the pattern used by Perl TAP tests
+        let result =
+            Spi::get_one::<i32>("SELECT vector_dims(ARRAY[random(), random(), random()]::vector)")
+                .expect("SPI failed")
+                .expect("NULL result");
+        assert_eq!(result, 3);
+    }
+
+    #[pg_test]
+    fn test_array_to_vector_insert() {
+        Spi::run("CREATE TABLE test_arr_cast (v vector(3))").expect("create table");
+        Spi::run(
+            "INSERT INTO test_arr_cast SELECT ARRAY[random(), random(), random()] \
+             FROM generate_series(1, 10) i",
+        )
+        .expect("insert");
+        let count = Spi::get_one::<i64>("SELECT COUNT(*) FROM test_arr_cast")
+            .expect("SPI failed")
+            .expect("NULL result");
+        assert_eq!(count, 10);
+        Spi::run("DROP TABLE test_arr_cast").expect("drop");
     }
 }
