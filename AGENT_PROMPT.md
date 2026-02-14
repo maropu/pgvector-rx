@@ -64,7 +64,7 @@ cargo check
 1. **Prioritize by labels**: `critical` > `high` > unlabeled
 2. **Respect dependencies**: Check Issue descriptions for prerequisites
 3. **Start with Phase 1** if nothing else is in progress
-4. **Choose manageable scope**: 2-4 hours of work maximum
+4. **Choose manageable scope**: Target 300-400 lines of code per iteration (not time-based)
 5. **Prefer failing tests**: If tests exist, fix failures before adding features
 
 ### 2. ANALYZE THE TASK (10 minutes)
@@ -114,15 +114,34 @@ cargo fmt
 - Document public functions with `///` comments
 - Keep functions small and focused
 - Match C behavior exactly (verify with original tests)
+- **Monitor code size**: If implementation exceeds ~400 lines, STOP and consider splitting into sub-tasks
+
+**If implementation grows too large (>400 lines)**:
+1. **STOP coding immediately**
+2. Analyze if the task can be split into smaller sub-tasks
+3. If splittable:
+   - **Discard current implementation** (git reset or stash)
+   - **Create sub-task Issues on GitHub** with detailed scope (~300-400 lines each)
+   - Use `gh issue create` to register each sub-task
+   - Link sub-tasks to parent Issue
+   - Pick ONE sub-task and restart implementation from scratch
+4. If not splittable: Continue but document why in commit message
 
 **Example work units** (good scope for one iteration):
-- ✅ Implement `Vector` type with serialization/deserialization
-- ✅ Add L2 distance function with tests
-- ✅ Create HNSW meta page structure
-- ✅ Implement neighbor selection algorithm
-- ❌ Complete entire index building (too large - break into smaller tasks)
+- ✅ Implement `Vector` type with serialization/deserialization (~250 lines)
+- ✅ Add L2 distance function with tests (~150 lines)
+- ✅ Create HNSW meta page structure (~200 lines)
+- ✅ Implement neighbor selection algorithm (~350 lines)
+- ❌ Complete entire index building (~1500+ lines - too large, split into sub-tasks)
 
 ### 4. VERIFY LOCALLY (30 minutes)
+
+**Before verification, check code size**:
+```bash
+# Count lines added (excluding tests, comments, blank lines)
+git diff --cached | grep '^+' | grep -v '^+++' | grep -v '^+\s*$' | grep -v '^+\s*//' | wc -l
+# Target: 300-400 lines. If >500 lines, consider splitting.
+```
 
 **Must pass before committing**:
 
@@ -277,7 +296,6 @@ Depends on #[IssueNumber] (if applicable)" \
 
 **Update documentation if needed**:
 - Update `DESIGNDOC.md` if architecture changed
-- Update `README.md` if user-facing features added
 - Add comments to complex algorithms
 
 **Final check**:
@@ -294,16 +312,37 @@ gh run list --limit 1  # Should show "completed" and "success" (for code changes
 
 ### When to Split Large Tasks
 
-If an Issue seems too large (>4 hours), split it:
+**CRITICAL**: Split tasks based on code size, not time estimates.
 
-**Example**: Issue #3 "Index Building" is massive
-1. Create sub-issues:
-   - "Implement HNSW meta page structure"
-   - "Implement graph node allocation"
-   - "Implement sequential insert during build"
-   - "Implement neighbor selection algorithm"
-   - "Implement ambuild callback"
-2. Add labels and dependencies
+**Split if**:
+- Initial analysis suggests >500 lines of implementation
+- During implementation, you've written >400 lines and task is incomplete
+- Task involves multiple independent components
+
+**How to split during implementation**:
+1. **Stop coding** when you reach ~400 lines
+2. Review what you've implemented and what remains
+3. If remaining work is substantial:
+   - **Discard current work**: `git reset --hard` or `git stash`
+   - **Create sub-task Issues on GitHub** (each targeting 300-400 lines):
+     ```bash
+     gh issue create \
+       --title "[Parent #N] Sub-task: [description]" \
+       --body "## Context\nSplit from #N due to code size (>400 lines)\n\n## Estimated Lines\n~300-400 lines\n\n## Tasks\n- [ ] Task details\n\n## Parent Issue\nPart of #N" \
+       --label "phase-X" \
+       --label "subtask"
+     ```
+   - Document split rationale in parent Issue comments
+   - Pick smallest sub-task and restart fresh
+
+**Example**: Issue #3 "Index Building" (estimated 1500+ lines)
+1. Split into sub-issues (~300-400 lines each):
+   - "Implement HNSW meta page structure" (~200 lines)
+   - "Implement graph node allocation" (~300 lines)
+   - "Implement sequential insert during build" (~400 lines)
+   - "Implement neighbor selection algorithm" (~350 lines)
+   - "Implement ambuild callback" (~250 lines)
+2. Add labels, dependencies, and line estimates
 3. Work on smallest sub-issue first
 
 ### When to Add Tests
@@ -342,20 +381,25 @@ You're autonomous, but if you encounter:
 2. **Ignoring CI failures**: Must be green before moving on
 3. **Working on multiple Issues**: One at a time
 4. **Skipping tests**: Tests are mandatory
-5. **Large monolithic commits**: Break work into small pieces
-6. **Forgetting Co-authored-by trailer**: Always include it
-7. **Not creating Issues for new work**: Track everything
-8. **Copying C code directly**: Translate to idiomatic Rust
+5. **Large monolithic commits**: >400 lines requires split consideration
+6. **Continuing when code grows too large**: Stop at ~400 lines and split
+7. **Forgetting Co-authored-by trailer**: Always include it
+8. **Not creating Issues for new work**: Track everything
+9. **Copying C code directly**: Translate to idiomatic Rust
 
 ### ✅ Do This
 1. **Test-driven development**: Write tests first
-2. **Small commits**: One logical change per commit
-3. **Clear commit messages**: Reference Issue numbers
-4. **Update Issues**: Comment on progress
-5. **Follow coding standards**: Read `.copilot-instructions.md`
-6. **Verify CI**: Always check GitHub Actions
-7. **Document decisions**: Explain non-obvious code
-8. **Create sub-issues**: Break large tasks down
+2. **Small commits**: Target 300-400 lines of implementation code
+3. **Monitor code size**: Check line count regularly during implementation
+4. **Split when too large**:
+   - Discard implementation if >400 lines
+   - Create GitHub Issues for each sub-task using `gh issue create`
+   - Link sub-tasks to parent Issue
+5. **Clear commit messages**: Reference Issue numbers
+6. **Update Issues**: Comment on progress and line counts
+7. **Follow coding standards**: Read `.copilot-instructions.md`
+8. **Verify CI**: Always check GitHub Actions
+9. **Document decisions**: Explain non-obvious code
 
 ## EXAMPLE ITERATION
 
@@ -367,7 +411,6 @@ gh issue list --label critical
 # Select Issue #1 (Phase 1: Vector type)
 
 # 2. ANALYZE
-cat .copilot-instructions.md | grep -A 20 "Type Conversion"
 cat references/pgvector/src/vector.c
 # Understand: Need FromDatum/IntoDatum for Vector type
 
