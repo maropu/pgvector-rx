@@ -16,7 +16,7 @@ use crate::hnsw_constants::*;
 use crate::index::options::HnswOptions;
 use crate::index::scan::{
     buffer_get_page, get_meta_page_info, hnsw_page_get_meta, hnsw_page_get_meta_mut, load_element,
-    search_layer_disk, ScanCandidate,
+    load_neighbor_tids, search_layer_disk, ScanCandidate,
 };
 use crate::types::hnsw::*;
 use crate::types::vector::VectorHeader;
@@ -291,12 +291,324 @@ unsafe fn add_element_on_disk(
 // Neighbor updates
 // ---------------------------------------------------------------------------
 
-/// Update a single neighbor's connection to include the new element.
+/// Simple on-disk candidate for neighbor selection during back-connection
+/// updates. Holds the element's block/offset and distance to the neighbor
+/// element (NOT to the query).
+struct UpdateCandidate {
+    blkno: pg_sys::BlockNumber,
+    offno: pg_sys::OffsetNumber,
+    distance: f64,
+}
+
+/// Determine the index at which to place the new element in a neighbor's
+/// connection list. Mirrors the C `GetUpdateIndex` logic:
+///
+/// - Returns `Some(-2)` when a free slot exists (caller finds it at write
+///   time since another backend may have filled it).
+/// - Returns `Some(i)` (i >= 0) to replace the existing connection at
+///   position `i` in the layer slice.
+/// - Returns `None` if the new element should NOT be added (not selected by
+///   heuristic, or neighbor is being deleted).
+///
+/// # Safety
+/// All index/query state must be valid. Does NOT hold buffer locks for the
+/// neighbor page so that the (potentially expensive) distance computations
+/// do not block other backends.
+#[allow(clippy::too_many_arguments)]
+unsafe fn get_update_index(
+    index: pg_sys::Relation,
+    neighbor_blkno: pg_sys::BlockNumber,
+    neighbor_offno: pg_sys::OffsetNumber,
+    neighbor_level: i32,
+    neighbor_neighbor_page: pg_sys::BlockNumber,
+    neighbor_neighbor_offno: pg_sys::OffsetNumber,
+    neighbor_version: u8,
+    m: i32,
+    lm: usize,
+    layer: i32,
+    new_distance: f64,
+    dist_fmgr: *mut pg_sys::FmgrInfo,
+    collation: pg_sys::Oid,
+) -> Option<i32> {
+    // Load the neighbor element's own vector datum for distance computation.
+    // We read without holding an exclusive lock (optimistic approach matching C).
+    let neighbor_datum = {
+        let buf = pg_sys::ReadBuffer(index, neighbor_blkno);
+        pg_sys::LockBuffer(buf, pg_sys::BUFFER_LOCK_SHARE as i32);
+        let page = buffer_get_page(buf);
+        let item_id = pg_sys::PageGetItemId(page, neighbor_offno);
+        let etup = pg_sys::PageGetItem(page, item_id) as *const HnswElementTupleData;
+
+        if (*etup).type_ != HNSW_ELEMENT_TUPLE_TYPE || (*etup).deleted != 0 {
+            pg_sys::UnlockReleaseBuffer(buf);
+            return None;
+        }
+
+        // Copy the vector data into palloc'd memory so we can release the buffer
+        let data_ptr = (etup as *const u8).add(std::mem::size_of::<HnswElementTupleData>());
+        let varlena_size = (*(data_ptr as *const u32) >> 2) as usize;
+        let copy = pg_sys::palloc(varlena_size) as *mut u8;
+        std::ptr::copy_nonoverlapping(data_ptr, copy, varlena_size);
+        pg_sys::UnlockReleaseBuffer(buf);
+        pg_sys::Datum::from(copy as usize)
+    };
+
+    // Load the current neighbor TIDs for the specified layer.
+    let tids = load_neighbor_tids(
+        index,
+        neighbor_neighbor_page,
+        neighbor_neighbor_offno,
+        neighbor_level,
+        neighbor_version,
+        m,
+        layer,
+    );
+    let tids: Vec<pg_sys::ItemPointerData> = match tids {
+        Some(t) => t,
+        None => {
+            pg_sys::pfree(neighbor_datum.cast_mut_ptr());
+            return None;
+        }
+    };
+
+    // If a free slot exists, signal with -2 (actual slot found at write time)
+    if tids.len() < lm {
+        pg_sys::pfree(neighbor_datum.cast_mut_ptr());
+        return Some(-2);
+    }
+
+    // All slots full: load each current neighbor's element, compute its
+    // distance to the neighbor element, and check for deleted elements.
+    let mut candidates: Vec<UpdateCandidate> = Vec::with_capacity(tids.len());
+    let mut pruned_deleted_idx: Option<usize> = None;
+
+    for (i, tid) in tids.iter().enumerate() {
+        let nb = pg_sys::ItemPointerGetBlockNumber(tid);
+        let no = pg_sys::ItemPointerGetOffsetNumber(tid);
+
+        // Load the connected element to get its distance to the neighbor
+        let buf = pg_sys::ReadBuffer(index, nb);
+        pg_sys::LockBuffer(buf, pg_sys::BUFFER_LOCK_SHARE as i32);
+        let page = buffer_get_page(buf);
+        let item_id = pg_sys::PageGetItemId(page, no);
+        let etup = pg_sys::PageGetItem(page, item_id) as *const HnswElementTupleData;
+
+        if (*etup).type_ != HNSW_ELEMENT_TUPLE_TYPE || (*etup).deleted != 0 {
+            // Element being deleted – can be replaced immediately
+            pg_sys::UnlockReleaseBuffer(buf);
+            if pruned_deleted_idx.is_none() {
+                pruned_deleted_idx = Some(i);
+            }
+            continue;
+        }
+
+        // Check if heaptids are all invalid (element being deleted)
+        let mut has_valid_heaptid = false;
+        for j in 0..HNSW_HEAPTIDS {
+            if pg_sys::ItemPointerIsValid(&(*etup).heaptids[j]) {
+                has_valid_heaptid = true;
+                break;
+            }
+        }
+        if !has_valid_heaptid {
+            pg_sys::UnlockReleaseBuffer(buf);
+            if pruned_deleted_idx.is_none() {
+                pruned_deleted_idx = Some(i);
+            }
+            continue;
+        }
+
+        // Compute distance from this connected element to the neighbor element
+        let data_ptr = (etup as *const u8).add(std::mem::size_of::<HnswElementTupleData>());
+        let value_datum = pg_sys::Datum::from(data_ptr as usize);
+        let result = pg_sys::FunctionCall2Coll(dist_fmgr, collation, neighbor_datum, value_datum);
+        let dist = f64::from_bits(result.value() as u64);
+        pg_sys::UnlockReleaseBuffer(buf);
+
+        candidates.push(UpdateCandidate {
+            blkno: nb,
+            offno: no,
+            distance: dist,
+        });
+    }
+
+    // If a deleted element was found, use its slot
+    if let Some(idx) = pruned_deleted_idx {
+        pg_sys::pfree(neighbor_datum.cast_mut_ptr());
+        return Some(idx as i32);
+    }
+
+    // Run the neighbor selection heuristic: add the new element as a candidate
+    // and see if it replaces one of the existing neighbors.
+    // Sort candidates by distance (ascending) for the heuristic.
+    candidates.sort_by(|a, b| {
+        a.distance
+            .partial_cmp(&b.distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Build combined list: existing candidates + new element, sorted by distance
+    // The heuristic processes from closest to farthest.
+    struct HeuristicCandidate {
+        blkno: pg_sys::BlockNumber,
+        offno: pg_sys::OffsetNumber,
+        distance: f64,
+        is_new: bool,
+    }
+
+    let mut all_candidates: Vec<HeuristicCandidate> = candidates
+        .iter()
+        .map(|c| HeuristicCandidate {
+            blkno: c.blkno,
+            offno: c.offno,
+            distance: c.distance,
+            is_new: false,
+        })
+        .collect();
+    // Add the new element as a candidate
+    all_candidates.push(HeuristicCandidate {
+        blkno: 0, // placeholder, won't be used for distance calc
+        offno: 0,
+        distance: new_distance,
+        is_new: true,
+    });
+    all_candidates.sort_by(|a, b| {
+        a.distance
+            .partial_cmp(&b.distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Simple heuristic: keep the lm closest candidates, checking diversity.
+    // For each candidate (closest first), add to result if it's closer to the
+    // neighbor than to any already-selected result element.
+    let mut selected: Vec<&HeuristicCandidate> = Vec::with_capacity(lm);
+    let mut pruned: Vec<&HeuristicCandidate> = Vec::new();
+
+    for hc in &all_candidates {
+        if selected.len() >= lm {
+            break;
+        }
+
+        // Check if this candidate is closer to the neighbor (query) than
+        // to any already-selected candidate
+        let mut closer = true;
+        for sel in &selected {
+            // Compute distance between hc and sel
+            // Both are on-disk elements, need to load and compare
+            if !hc.is_new && !sel.is_new {
+                let dist = compute_element_distance(
+                    index, hc.blkno, hc.offno, sel.blkno, sel.offno, dist_fmgr, collation,
+                );
+                if dist <= hc.distance {
+                    closer = false;
+                    break;
+                }
+            }
+            // If one is the new element, we can't easily compute inter-element
+            // distance without the new element's datum. For simplicity, treat
+            // the new element as always "closer" (it won't be pruned by this
+            // check). This matches the behavior where we just check distance.
+        }
+
+        if closer {
+            selected.push(hc);
+        } else {
+            pruned.push(hc);
+        }
+    }
+
+    // Fill remaining from pruned
+    for p in &pruned {
+        if selected.len() >= lm {
+            break;
+        }
+        selected.push(p);
+    }
+
+    // Check if the new element was selected
+    let new_selected = selected.iter().any(|s| s.is_new);
+    if !new_selected {
+        pg_sys::pfree(neighbor_datum.cast_mut_ptr());
+        return None;
+    }
+
+    // Find which existing element was NOT selected (the one to be replaced).
+    // Build set of selected existing element (blkno, offno).
+    let selected_existing: HashSet<(pg_sys::BlockNumber, pg_sys::OffsetNumber)> = selected
+        .iter()
+        .filter(|s| !s.is_new)
+        .map(|s| (s.blkno, s.offno))
+        .collect();
+
+    // Find the first existing neighbor in tids that is NOT in selected
+    let mut replace_idx: Option<usize> = None;
+    for (i, tid) in tids.iter().enumerate() {
+        let tb = pg_sys::ItemPointerGetBlockNumber(tid);
+        let to = pg_sys::ItemPointerGetOffsetNumber(tid);
+        if !selected_existing.contains(&(tb, to)) {
+            replace_idx = Some(i);
+            break;
+        }
+    }
+
+    pg_sys::pfree(neighbor_datum.cast_mut_ptr());
+
+    replace_idx.map(|i| i as i32)
+}
+
+/// Compute the distance between two on-disk elements.
+///
+/// # Safety
+/// `index` must be valid. Both elements must exist and not be deleted.
+unsafe fn compute_element_distance(
+    index: pg_sys::Relation,
+    blkno1: pg_sys::BlockNumber,
+    offno1: pg_sys::OffsetNumber,
+    blkno2: pg_sys::BlockNumber,
+    offno2: pg_sys::OffsetNumber,
+    dist_fmgr: *mut pg_sys::FmgrInfo,
+    collation: pg_sys::Oid,
+) -> f64 {
+    // Load first element's datum
+    let buf1 = pg_sys::ReadBuffer(index, blkno1);
+    pg_sys::LockBuffer(buf1, pg_sys::BUFFER_LOCK_SHARE as i32);
+    let page1 = buffer_get_page(buf1);
+    let item_id1 = pg_sys::PageGetItemId(page1, offno1);
+    let etup1 = pg_sys::PageGetItem(page1, item_id1) as *const HnswElementTupleData;
+    let data1 = (etup1 as *const u8).add(std::mem::size_of::<HnswElementTupleData>());
+    let size1 = (*(data1 as *const u32) >> 2) as usize;
+    let copy1 = pg_sys::palloc(size1) as *mut u8;
+    std::ptr::copy_nonoverlapping(data1, copy1, size1);
+    pg_sys::UnlockReleaseBuffer(buf1);
+
+    // Load second element's datum
+    let buf2 = pg_sys::ReadBuffer(index, blkno2);
+    pg_sys::LockBuffer(buf2, pg_sys::BUFFER_LOCK_SHARE as i32);
+    let page2 = buffer_get_page(buf2);
+    let item_id2 = pg_sys::PageGetItemId(page2, offno2);
+    let etup2 = pg_sys::PageGetItem(page2, item_id2) as *const HnswElementTupleData;
+    let data2 = (etup2 as *const u8).add(std::mem::size_of::<HnswElementTupleData>());
+    let datum2 = pg_sys::Datum::from(data2 as usize);
+
+    let datum1 = pg_sys::Datum::from(copy1 as usize);
+    let result = pg_sys::FunctionCall2Coll(dist_fmgr, collation, datum1, datum2);
+    pg_sys::UnlockReleaseBuffer(buf2);
+    pg_sys::pfree(copy1 as *mut std::ffi::c_void);
+
+    f64::from_bits(result.value() as u64)
+}
+
+/// Update a single neighbor's connection list on disk using the computed
+/// update index.
+///
+/// `update_idx`:
+/// - `-2`: a free slot was available; find it again at write time
+/// - `>= 0`: replace the connection at this layer-relative index
 ///
 /// # Safety
 /// `index` must be valid.
 #[allow(clippy::too_many_arguments)]
-unsafe fn update_neighbor_on_disk(
+unsafe fn write_neighbor_update(
     index: pg_sys::Relation,
     neighbor_page: pg_sys::BlockNumber,
     neighbor_offno: pg_sys::OffsetNumber,
@@ -306,6 +618,7 @@ unsafe fn update_neighbor_on_disk(
     layer: i32,
     new_blkno: pg_sys::BlockNumber,
     new_offno: pg_sys::OffsetNumber,
+    update_idx: i32,
 ) {
     let lm = hnsw_get_layer_m(m, layer) as usize;
 
@@ -337,25 +650,30 @@ unsafe fn update_neighbor_on_disk(
         if pg_sys::ItemPointerGetBlockNumber(tid) == new_blkno
             && pg_sys::ItemPointerGetOffsetNumber(tid) == new_offno
         {
-            // Already connected
             pg_sys::GenericXLogAbort(state);
             pg_sys::UnlockReleaseBuffer(buf);
             return;
         }
     }
 
-    // Find a free slot or the worst neighbor to replace
-    let mut free_idx: Option<usize> = None;
-    for i in 0..lm {
-        let tid = &*tids_base.add(start_idx + i);
-        if !pg_sys::ItemPointerIsValid(tid) {
-            free_idx = Some(start_idx + i);
-            break;
+    let idx = if update_idx == -2 {
+        // Find a free slot (it may have been filled by another backend)
+        let mut found = None;
+        for i in 0..lm {
+            let tid = &*tids_base.add(start_idx + i);
+            if !pg_sys::ItemPointerIsValid(tid) {
+                found = Some(start_idx + i);
+                break;
+            }
         }
-    }
+        found
+    } else if update_idx >= 0 {
+        Some(start_idx + update_idx as usize)
+    } else {
+        None
+    };
 
-    if let Some(idx) = free_idx {
-        // Free slot available — add the connection
+    if let Some(idx) = idx {
         if idx < (*ntup).count as usize {
             let indextid = &mut *tids_base.add(idx);
             pg_sys::ItemPointerSet(indextid, new_blkno, new_offno);
@@ -364,7 +682,6 @@ unsafe fn update_neighbor_on_disk(
             pg_sys::GenericXLogAbort(state);
         }
     } else {
-        // All slots full — skip (simplified: don't replace neighbors yet)
         pg_sys::GenericXLogAbort(state);
     }
 
@@ -372,6 +689,11 @@ unsafe fn update_neighbor_on_disk(
 }
 
 /// Update all neighbors of the new element to add back-connections.
+///
+/// For each neighbor selected during insertion, loads its current connection
+/// list, runs the neighbor selection heuristic to determine if the new
+/// element should be added (possibly replacing an existing connection), and
+/// writes the update to disk.
 ///
 /// # Safety
 /// `index` must be valid.
@@ -410,7 +732,29 @@ pub(crate) unsafe fn update_neighbors_on_disk(
                 None => continue,
             };
 
-            update_neighbor_on_disk(
+            // Determine where to place the back-connection
+            let update_idx = get_update_index(
+                index,
+                neighbor.blkno,
+                neighbor.offno,
+                neighbor.level,
+                neighbor.neighbor_page,
+                neighbor.neighbor_offno,
+                neighbor.version,
+                m,
+                lm,
+                lc,
+                sc.distance,
+                dist_fmgr,
+                collation,
+            );
+
+            let update_idx = match update_idx {
+                Some(idx) => idx,
+                None => continue,
+            };
+
+            write_neighbor_update(
                 index,
                 neighbor.neighbor_page,
                 neighbor.neighbor_offno,
@@ -420,6 +764,7 @@ pub(crate) unsafe fn update_neighbors_on_disk(
                 lc,
                 new_blkno,
                 new_offno,
+                update_idx,
             );
         }
     }
@@ -673,7 +1018,7 @@ pub unsafe extern "C-unwind" fn aminsert(
     pg_sys::LockPage(index_relation, HNSW_UPDATE_LOCK, lockmode);
 
     // Read meta page info
-    let (_, entry_blkno, entry_offno, entry_level) = get_meta_page_info(index_relation);
+    let (_, mut entry_blkno, mut entry_offno, mut entry_level) = get_meta_page_info(index_relation);
 
     // Assign random level
     let r: f64 = rand::random::<f64>().max(f64::MIN_POSITIVE);
@@ -684,6 +1029,13 @@ pub unsafe extern "C-unwind" fn aminsert(
         pg_sys::UnlockPage(index_relation, HNSW_UPDATE_LOCK, lockmode);
         lockmode = pg_sys::ExclusiveLock as pg_sys::LOCKMODE;
         pg_sys::LockPage(index_relation, HNSW_UPDATE_LOCK, lockmode);
+
+        // Re-read meta page after lock upgrade (another backend may have
+        // updated the entry point while we waited for the exclusive lock)
+        let (_, eb, eo, el) = get_meta_page_info(index_relation);
+        entry_blkno = eb;
+        entry_offno = eo;
+        entry_level = el;
     }
 
     // Find neighbors

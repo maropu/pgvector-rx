@@ -312,8 +312,7 @@ pub(crate) unsafe fn search_layer_disk(
         if add_entry_to_visited {
             visited.insert((ep.blkno, ep.offno));
         }
-        let should_count =
-            skip_count.is_none_or(|sc| !sc.contains(&(ep.blkno, ep.offno)));
+        let should_count = skip_count.is_none_or(|sc| !sc.contains(&(ep.blkno, ep.offno)));
         candidates.push(NearestSC(ep.clone()));
         results.push(FurthestSC(ep));
         if should_count {
@@ -399,8 +398,7 @@ pub(crate) unsafe fn search_layer_disk(
 
             candidates.push(NearestSC(e.clone()));
             results.push(FurthestSC(e.clone()));
-            let should_count =
-                skip_count.is_none_or(|sc| !sc.contains(&(e.blkno, e.offno)));
+            let should_count = skip_count.is_none_or(|sc| !sc.contains(&(e.blkno, e.offno)));
             if should_count {
                 w_len += 1;
             }
@@ -692,6 +690,19 @@ pub unsafe extern "C-unwind" fn amgettuple(
     let iterative_scan = HNSW_ITERATIVE_SCAN.get();
 
     if so.first {
+        // Count index scan for stats (equivalent to pgstat_count_index_scan macro)
+        {
+            let rel = (*scan).indexRelation;
+            if !(*rel).pgstat_info.is_null() {
+                (*(*rel).pgstat_info).counts.numscans += 1;
+            } else if (*rel).pgstat_enabled {
+                pg_sys::pgstat_assoc_relation(rel);
+                if !(*rel).pgstat_info.is_null() {
+                    (*(*rel).pgstat_info).counts.numscans += 1;
+                }
+            }
+        }
+
         // Safety check: HNSW requires ORDER BY
         if (*scan).orderByData.is_null() {
             pgrx::error!("cannot scan hnsw index without order");
