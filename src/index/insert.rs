@@ -599,7 +599,7 @@ pub unsafe extern "C-unwind" fn aminsert(
 
     // Detoast the vector datum
     let raw_datum = *values.add(0);
-    let vec_ptr = pg_sys::pg_detoast_datum(raw_datum.cast_mut_ptr()) as *const VectorHeader;
+    let mut vec_ptr = pg_sys::pg_detoast_datum(raw_datum.cast_mut_ptr()) as *const VectorHeader;
     let dim = (*vec_ptr).dim as i32;
 
     if !(1..=HNSW_MAX_DIM).contains(&dim) {
@@ -630,6 +630,8 @@ pub unsafe extern "C-unwind" fn aminsert(
         if norm_val == 0.0 {
             return false;
         }
+        // Normalize the vector to unit length for cosine distance.
+        vec_ptr = crate::types::vector::l2_normalize_raw(vec_ptr);
     }
 
     // Get index parameters

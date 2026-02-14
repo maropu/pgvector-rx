@@ -11,7 +11,8 @@ use super::vacuum::{ambulkdelete, amvacuumcleanup};
 
 /// Cost estimate for HNSW index scans.
 ///
-/// Uses a simple placeholder implementation matching pgvector's approach.
+/// Returns infinity cost when no ORDER BY is present, preventing the planner
+/// from choosing the HNSW index for queries like `SELECT COUNT(*)`.
 #[pg_guard]
 #[allow(clippy::too_many_arguments)]
 unsafe extern "C-unwind" fn amcostestimate(
@@ -26,13 +27,26 @@ unsafe extern "C-unwind" fn amcostestimate(
 ) {
     // SAFETY: All pointers are provided by the PostgreSQL planner and are
     // guaranteed to be valid.
-    if !path.is_null() {
-        *index_startup_cost = 0.0;
-        *index_total_cost = 0.0;
-        *index_selectivity = 1.0;
+    if path.is_null() {
+        return;
+    }
+
+    // Never use index without ORDER BY — HNSW requires a distance ordering.
+    if (*path).indexorderbys.is_null() {
+        *index_startup_cost = f64::INFINITY;
+        *index_total_cost = f64::INFINITY;
+        *index_selectivity = 0.0;
         *index_correlation = 0.0;
         *index_pages = 0.0;
+        (*path).path.disabled_nodes = 2;
+        return;
     }
+
+    *index_startup_cost = 0.0;
+    *index_total_cost = 0.0;
+    *index_selectivity = 1.0;
+    *index_correlation = 0.0;
+    *index_pages = 0.0;
 }
 
 /// Validate operator class — always returns true for now.

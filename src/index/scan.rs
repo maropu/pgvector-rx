@@ -561,6 +561,8 @@ struct HnswScanState {
     first: bool,
     /// Distance function FmgrInfo pointer.
     dist_fmgr: *mut pg_sys::FmgrInfo,
+    /// Norm function FmgrInfo pointer (for cosine normalization), or null.
+    norm_fmgr: *mut pg_sys::FmgrInfo,
     /// Collation for the distance function.
     collation: pg_sys::Oid,
     /// Result list sorted by distance (nearest last for pop).
@@ -600,9 +602,22 @@ pub unsafe extern "C-unwind" fn ambeginscan(
     let dist_fmgr = pg_sys::index_getprocinfo(index_relation, 1, HNSW_DISTANCE_PROC);
     let collation = (*index_relation).rd_indcollation.read();
 
+    // Get norm function (for cosine normalization), if present.
+    let norm_fmgr = if (*index_relation)
+        .rd_support
+        .add(HNSW_NORM_PROC as usize - 1)
+        .read()
+        != pg_sys::InvalidOid
+    {
+        pg_sys::index_getprocinfo(index_relation, 1, HNSW_NORM_PROC)
+    } else {
+        std::ptr::null_mut()
+    };
+
     let state = Box::new(HnswScanState {
         first: true,
         dist_fmgr,
+        norm_fmgr,
         collation,
         results: Vec::new(),
         m: 0,
@@ -681,7 +696,14 @@ pub unsafe extern "C-unwind" fn amgettuple(
         let query_datum = if order_by.sk_flags & pg_sys::SK_ISNULL as i32 != 0 {
             pg_sys::Datum::from(0usize)
         } else {
-            order_by.sk_argument
+            let value = order_by.sk_argument;
+            // Normalize the query vector for cosine distance
+            if !so.norm_fmgr.is_null() && value.value() != 0 {
+                let normalized = crate::types::vector::l2_normalize_raw(value.cast_mut_ptr());
+                pg_sys::Datum::from(normalized as usize)
+            } else {
+                value
+            }
         };
 
         // Get ef_search GUC value

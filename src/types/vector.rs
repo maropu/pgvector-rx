@@ -99,6 +99,32 @@ pub unsafe fn init_vector(dim: i32) -> *mut VectorHeader {
     result
 }
 
+/// L2-normalize a vector, returning a newly allocated normalized copy.
+///
+/// # Safety
+/// `vec` must point to a valid `VectorHeader`. Allocates via `palloc0`.
+pub unsafe fn l2_normalize_raw(vec: *const VectorHeader) -> *const VectorHeader {
+    let dim = (*vec).dim as usize;
+    let ax = vector_data(vec);
+
+    let mut norm: f64 = 0.0;
+    for i in 0..dim {
+        let v = *ax.add(i) as f64;
+        norm += v * v;
+    }
+    norm = norm.sqrt();
+
+    let result = init_vector(dim as i32);
+    let rx = vector_data_mut(result);
+    if norm > 0.0 {
+        for i in 0..dim {
+            *rx.add(i) = (*ax.add(i) as f64 / norm) as f32;
+        }
+    }
+
+    result as *const VectorHeader
+}
+
 /// Returns a mutable pointer to the float data of a vector.
 ///
 /// # Safety
@@ -440,6 +466,7 @@ pg_fn_info!(cosine_distance);
 pg_fn_info!(l1_distance);
 pg_fn_info!(vector_dims);
 pg_fn_info!(vector_norm);
+pg_fn_info!(l2_normalize);
 
 /// L2 (Euclidean) distance between two vectors.
 #[no_mangle]
@@ -543,6 +570,32 @@ pub unsafe extern "C-unwind" fn vector_norm(fcinfo: pg_sys::FunctionCallInfo) ->
     pg_sys::Datum::from(f64::to_bits(result))
 }
 
+/// L2-normalize a vector to unit length.
+#[no_mangle]
+#[pg_guard]
+pub unsafe extern "C-unwind" fn l2_normalize(fcinfo: pg_sys::FunctionCallInfo) -> pg_sys::Datum {
+    let a = pg_sys::pg_detoast_datum(fc_arg(fcinfo, 0).cast_mut_ptr()) as *const VectorHeader;
+    let ax = vector_data(a);
+    let dim = (*a).dim as usize;
+
+    let mut norm: f64 = 0.0;
+    for i in 0..dim {
+        let v = *ax.add(i) as f64;
+        norm += v * v;
+    }
+    norm = norm.sqrt();
+
+    let result = init_vector(dim as i32);
+    let rx = vector_data_mut(result);
+    if norm > 0.0 {
+        for i in 0..dim {
+            *rx.add(i) = (*ax.add(i) as f64 / norm) as f32;
+        }
+    }
+
+    pg_sys::Datum::from(result as usize)
+}
+
 // ---------------------------------------------------------------------------
 // SQL registration
 // ---------------------------------------------------------------------------
@@ -610,6 +663,9 @@ CREATE FUNCTION vector_dims(vector) RETURNS integer
     AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE FUNCTION vector_norm(vector) RETURNS float8
+    AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION l2_normalize(vector) RETURNS vector
     AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- Distance operators
