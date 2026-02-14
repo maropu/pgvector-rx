@@ -79,18 +79,125 @@ struct InsertedElement {
     updated_insert_page: pg_sys::BlockNumber,
 }
 
+/// Result of finding a deleted element slot that can be reused.
+struct FreeOffsetResult {
+    elem_offno: pg_sys::OffsetNumber,
+    neighbor_offno: pg_sys::OffsetNumber,
+    neighbor_blkno: pg_sys::BlockNumber,
+    /// Buffer for the neighbor page (only valid when neighbor is on a
+    /// different page from the element).
+    nbuf: pg_sys::Buffer,
+    tuple_version: u8,
+}
+
+/// Scan page items for a deleted element whose slot can be reused.
+///
+/// Checks whether the old element's space (including page free space) can
+/// accommodate the new element tuple, and likewise for the neighbor tuple.
+///
+/// On success, returns offset numbers to overwrite. If the neighbor resides
+/// on a different page, that page is locked exclusively and its buffer is
+/// returned in `FreeOffsetResult::nbuf`.
+///
+/// # Safety
+/// `buf` must be exclusively locked. `page` must be the GenericXLog copy of
+/// that buffer. Both tuple sizes must be MAXALIGN'd.
+unsafe fn hnsw_free_offset(
+    index: pg_sys::Relation,
+    buf: pg_sys::Buffer,
+    page: pg_sys::Page,
+    etup_size: usize,
+    ntup_size: usize,
+    new_insert_page: &mut pg_sys::BlockNumber,
+) -> Option<FreeOffsetResult> {
+    let maxoffno = pg_sys::PageGetMaxOffsetNumber(page as *const pg_sys::PageData);
+    let element_page = pg_sys::BufferGetBlockNumber(buf);
+
+    let mut offno: pg_sys::OffsetNumber = 1; // FirstOffsetNumber
+    while offno <= maxoffno {
+        let eitemid = pg_sys::PageGetItemId(page, offno);
+
+        // Skip items without storage (safety check for assert-enabled builds)
+        if (*eitemid).lp_flags() != pg_sys::LP_NORMAL {
+            offno += 1;
+            continue;
+        }
+
+        let etup = pg_sys::PageGetItem(page, eitemid) as *const HnswElementTupleData;
+
+        // Skip neighbor tuples
+        if (*etup).type_ != HNSW_ELEMENT_TUPLE_TYPE {
+            offno += 1;
+            continue;
+        }
+
+        if (*etup).deleted != 0 {
+            let neighbor_blkno =
+                pg_sys::ItemPointerGetBlockNumber(&(*etup).neighbortid as *const _);
+            let neighbor_offno =
+                pg_sys::ItemPointerGetOffsetNumber(&(*etup).neighbortid as *const _);
+
+            if *new_insert_page == pg_sys::InvalidBlockNumber {
+                *new_insert_page = element_page;
+            }
+
+            let (nbuf, npage_raw) = if neighbor_blkno == element_page {
+                (buf, page as *const pg_sys::PageData)
+            } else {
+                let nb = pg_sys::ReadBuffer(index, neighbor_blkno);
+                pg_sys::LockBuffer(nb, pg_sys::BUFFER_LOCK_EXCLUSIVE as i32);
+                // SAFETY: only used for space calculation, not WAL
+                let np = buffer_get_page(nb);
+                (nb, np as *const pg_sys::PageData)
+            };
+
+            let nitemid = pg_sys::PageGetItemId(npage_raw as pg_sys::Page, neighbor_offno);
+
+            // Calculate available space individually since tuples are
+            // overwritten in separate PageIndexTupleOverwrite calls.
+            let page_free = (*eitemid).lp_len() as usize
+                + pg_sys::PageGetExactFreeSpace(page as *const pg_sys::PageData);
+            let mut npage_free = (*nitemid).lp_len() as usize;
+            if neighbor_blkno != element_page {
+                npage_free += pg_sys::PageGetExactFreeSpace(npage_raw);
+            } else if page_free >= etup_size {
+                npage_free += page_free - etup_size;
+            }
+
+            if page_free >= etup_size && npage_free >= ntup_size {
+                return Some(FreeOffsetResult {
+                    elem_offno: offno,
+                    neighbor_offno,
+                    neighbor_blkno,
+                    nbuf: if neighbor_blkno != element_page {
+                        nbuf
+                    } else {
+                        0 // invalid, same page
+                    },
+                    tuple_version: (*etup).version,
+                });
+            } else if nbuf != buf {
+                pg_sys::UnlockReleaseBuffer(nbuf);
+            }
+        }
+        offno += 1;
+    }
+    None
+}
+
 /// Add element and neighbor tuples to disk pages, using GenericXLog for WAL.
 ///
-/// Walks the page chain starting from `insert_page` to find space.
+/// Walks the page chain starting from `insert_page` to find space. Reuses
+/// slots from deleted elements when possible via `PageIndexTupleOverwrite`.
 ///
 /// # Safety
 /// `index` must be valid. All buffers are properly locked and released.
 #[allow(clippy::too_many_arguments)]
 unsafe fn add_element_on_disk(
     index: pg_sys::Relation,
-    etup_data: *const u8,
+    etup_data: *mut u8,
     etup_size: usize,
-    ntup_data: *const u8,
+    ntup_data: *mut u8,
     ntup_size: usize,
     insert_page: pg_sys::BlockNumber,
 ) -> InsertedElement {
@@ -158,6 +265,78 @@ unsafe fn add_element_on_disk(
                 offno: elem_offno,
                 neighbor_page: elem_blkno,
                 neighbor_offno,
+                updated_insert_page: if new_insert_page != insert_page {
+                    new_insert_page
+                } else {
+                    pg_sys::InvalidBlockNumber
+                },
+            };
+        }
+
+        // Try reusing space from a deleted element
+        if let Some(free) =
+            hnsw_free_offset(index, buf, page, etup_size, ntup_size, &mut new_insert_page)
+        {
+            // Set tuple version to match the deleted slot
+            let etup = etup_data as *mut HnswElementTupleData;
+            (*etup).version = free.tuple_version;
+            let ntup = ntup_data as *mut HnswNeighborTupleData;
+            (*ntup).version = free.tuple_version;
+
+            let elem_blkno = pg_sys::BufferGetBlockNumber(buf);
+
+            // Register neighbor page with GenericXLog if on a different page
+            let npage = if free.neighbor_blkno != elem_blkno {
+                pg_sys::GenericXLogRegisterBuffer(state, free.nbuf, 0)
+            } else {
+                page
+            };
+
+            // Overwrite deleted element tuple
+            if !pg_sys::PageIndexTupleOverwrite(
+                page,
+                free.elem_offno,
+                etup_data as pg_sys::Item,
+                etup_size,
+            ) {
+                pg_sys::GenericXLogAbort(state);
+                if free.nbuf != 0 && free.nbuf != buf {
+                    pg_sys::UnlockReleaseBuffer(free.nbuf);
+                }
+                pg_sys::UnlockReleaseBuffer(buf);
+                pgrx::error!("pgvector-rx: failed to overwrite element tuple");
+            }
+
+            // Overwrite deleted neighbor tuple
+            if !pg_sys::PageIndexTupleOverwrite(
+                npage,
+                free.neighbor_offno,
+                ntup_data as pg_sys::Item,
+                ntup_size,
+            ) {
+                pg_sys::GenericXLogAbort(state);
+                if free.nbuf != 0 && free.nbuf != buf {
+                    pg_sys::UnlockReleaseBuffer(free.nbuf);
+                }
+                pg_sys::UnlockReleaseBuffer(buf);
+                pgrx::error!("pgvector-rx: failed to overwrite neighbor tuple");
+            }
+
+            if new_insert_page == pg_sys::InvalidBlockNumber {
+                new_insert_page = free.neighbor_blkno;
+            }
+
+            pg_sys::GenericXLogFinish(state);
+            if free.nbuf != 0 && free.nbuf != buf {
+                pg_sys::UnlockReleaseBuffer(free.nbuf);
+            }
+            pg_sys::UnlockReleaseBuffer(buf);
+
+            return InsertedElement {
+                blkno: elem_blkno,
+                offno: free.elem_offno,
+                neighbor_page: free.neighbor_blkno,
+                neighbor_offno: free.neighbor_offno,
                 updated_insert_page: if new_insert_page != insert_page {
                     new_insert_page
                 } else {
