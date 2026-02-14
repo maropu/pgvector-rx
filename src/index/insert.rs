@@ -7,6 +7,8 @@
 //! 3. Updating existing neighbor back-connections
 //! 4. Updating the meta page (entry point and insert page)
 
+use std::collections::HashSet;
+
 use pgrx::pg_guard;
 use pgrx::pg_sys;
 
@@ -500,6 +502,7 @@ pub(crate) unsafe fn find_element_neighbors_on_disk(
     entry_blkno: pg_sys::BlockNumber,
     entry_offno: pg_sys::OffsetNumber,
     entry_level: i32,
+    skip_set: Option<&HashSet<(pg_sys::BlockNumber, pg_sys::OffsetNumber)>>,
 ) -> Vec<Vec<ScanCandidate>> {
     let mut neighbors_by_layer: Vec<Vec<ScanCandidate>> =
         vec![Vec::new(); (new_level + 1) as usize];
@@ -534,6 +537,7 @@ pub(crate) unsafe fn find_element_neighbors_on_disk(
             None,
             None,
             true,
+            skip_set,
         );
         ep_list = if w.is_empty() {
             return neighbors_by_layer;
@@ -547,10 +551,17 @@ pub(crate) unsafe fn find_element_neighbors_on_disk(
     for lc in (0..=start_level).rev() {
         let lm = hnsw_get_layer_m(m, lc) as usize;
 
+        // For vacuum repair: increase ef by 1 to account for self-skip
+        let ef = if skip_set.is_some() {
+            ef_construction as usize + 1
+        } else {
+            ef_construction as usize
+        };
+
         let w = search_layer_disk(
             index,
             ep_list,
-            ef_construction as usize,
+            ef,
             lc,
             m,
             query_datum,
@@ -559,10 +570,23 @@ pub(crate) unsafe fn find_element_neighbors_on_disk(
             None,
             None,
             true,
+            skip_set,
         );
 
-        // Select up to lm nearest neighbors (simple selection)
-        let selected: Vec<ScanCandidate> = w.iter().rev().take(lm).cloned().collect();
+        // Filter out elements in skip set, then select up to lm nearest neighbors
+        let filtered: Vec<&ScanCandidate> = if let Some(ss) = skip_set {
+            w.iter()
+                .filter(|c| !ss.contains(&(c.blkno, c.offno)))
+                .collect()
+        } else {
+            w.iter().collect()
+        };
+        let selected: Vec<ScanCandidate> = filtered
+            .iter()
+            .rev()
+            .take(lm)
+            .map(|c| (*c).clone())
+            .collect();
         neighbors_by_layer[lc as usize] = selected;
 
         ep_list = w;
@@ -675,6 +699,7 @@ pub unsafe extern "C-unwind" fn aminsert(
             entry_blkno,
             entry_offno,
             entry_level,
+            None,
         )
     } else {
         vec![Vec::new(); (new_level + 1) as usize]

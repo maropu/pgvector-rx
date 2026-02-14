@@ -12,9 +12,7 @@ use pgrx::pg_guard;
 use pgrx::pg_sys;
 
 use crate::hnsw_constants::*;
-use crate::index::insert::{
-    find_element_neighbors_on_disk, update_meta_page, update_neighbors_on_disk,
-};
+use crate::index::insert::{find_element_neighbors_on_disk, update_meta_page};
 use crate::index::options::HnswOptions;
 use crate::index::scan::{buffer_get_page, get_meta_page_info, load_element, ScanCandidate};
 use crate::types::hnsw::*;
@@ -289,7 +287,8 @@ unsafe fn repair_graph_element(
         return;
     }
 
-    // Read the element's vector data from disk to use as query
+    // Read the element's vector data into memory to avoid holding buffer locks
+    // during the search and neighbor update phases.
     let buf = pg_sys::ReadBufferExtended(
         vs.index,
         pg_sys::ForkNumber::MAIN_FORKNUM,
@@ -302,14 +301,23 @@ unsafe fn repair_graph_element(
     let item_id = pg_sys::PageGetItemId(page, element_offno);
     let etup = pg_sys::PageGetItem(page, item_id) as *const HnswElementTupleData;
     let version = (*etup).version;
-    let data_ptr = (etup as *const u8).add(std::mem::size_of::<HnswElementTupleData>());
-    let query_datum = pg_sys::Datum::from(data_ptr as usize);
-
-    // Load neighbor page info before releasing the buffer
     let neighbor_page = pg_sys::ItemPointerGetBlockNumber(&(*etup).neighbortid);
     let neighbor_offno = pg_sys::ItemPointerGetOffsetNumber(&(*etup).neighbortid);
 
-    // Find new neighbors using on-disk search
+    // Copy vector data into palloc'd memory so we can release the buffer
+    let data_ptr = (etup as *const u8).add(std::mem::size_of::<HnswElementTupleData>());
+    let varlena_size = (*(data_ptr as *const u32) >> 2) as usize;
+    let vec_copy = pg_sys::palloc(varlena_size) as *mut u8;
+    std::ptr::copy_nonoverlapping(data_ptr, vec_copy, varlena_size);
+    let query_datum = pg_sys::Datum::from(vec_copy as usize);
+
+    pg_sys::UnlockReleaseBuffer(buf);
+
+    // Build skip set: deleted elements + self (to avoid self-reference)
+    let mut skip = vs.deleted.clone();
+    skip.insert((element_blkno, element_offno));
+
+    // Find new neighbors using on-disk search (no buffer locks held)
     let neighbors_by_layer = find_element_neighbors_on_disk(
         vs.index,
         query_datum,
@@ -321,9 +329,8 @@ unsafe fn repair_graph_element(
         entry_blkno,
         entry_offno,
         entry_level,
+        Some(&skip),
     );
-
-    pg_sys::UnlockReleaseBuffer(buf);
 
     // Build new neighbor tuple
     let ntup_size = hnsw_neighbor_tuple_size(element_level as usize, vs.m as usize);
@@ -333,7 +340,6 @@ unsafe fn repair_graph_element(
     (*ntup).version = version;
 
     // Fill in neighbor TIDs
-    let mut total_count: u16 = 0;
     let tids_base =
         ntup_buf.add(std::mem::size_of::<HnswNeighborTupleData>()) as *mut pg_sys::ItemPointerData;
 
@@ -345,11 +351,11 @@ unsafe fn repair_graph_element(
             for (i, sc) in layer_neighbors.iter().take(lm).enumerate() {
                 let tid = &mut *tids_base.add(start_idx + i);
                 pg_sys::ItemPointerSet(tid, sc.blkno, sc.offno);
-                total_count = total_count.max((start_idx + i + 1) as u16);
             }
         }
     }
-    (*ntup).count = total_count;
+    // count must equal total slots so load_neighbor_tids accepts the tuple
+    (*ntup).count = ((element_level + 2) * vs.m) as u16;
 
     // Overwrite neighbor tuple on disk
     let nbuf = pg_sys::ReadBufferExtended(
@@ -375,36 +381,7 @@ unsafe fn repair_graph_element(
     pg_sys::UnlockReleaseBuffer(nbuf);
 
     pg_sys::pfree(ntup_buf as *mut std::ffi::c_void);
-
-    // Update back-connections from new neighbors
-    // Re-read element vector for distance computation
-    let buf2 = pg_sys::ReadBufferExtended(
-        vs.index,
-        pg_sys::ForkNumber::MAIN_FORKNUM,
-        element_blkno,
-        pg_sys::ReadBufferMode::RBM_NORMAL,
-        vs.bas,
-    );
-    pg_sys::LockBuffer(buf2, pg_sys::BUFFER_LOCK_SHARE as i32);
-    let page2 = buffer_get_page(buf2);
-    let item_id2 = pg_sys::PageGetItemId(page2, element_offno);
-    let etup2 = pg_sys::PageGetItem(page2, item_id2) as *const HnswElementTupleData;
-    let data_ptr2 = (etup2 as *const u8).add(std::mem::size_of::<HnswElementTupleData>());
-    let query_datum2 = pg_sys::Datum::from(data_ptr2 as usize);
-
-    update_neighbors_on_disk(
-        vs.index,
-        element_blkno,
-        element_offno,
-        element_level,
-        &neighbors_by_layer,
-        vs.m,
-        query_datum2,
-        dist_fmgr,
-        collation,
-    );
-
-    pg_sys::UnlockReleaseBuffer(buf2);
+    pg_sys::pfree(vec_copy as *mut std::ffi::c_void);
 }
 
 /// Repair the entry point if it was deleted, then repair all other elements.
@@ -674,8 +651,8 @@ unsafe fn mark_deleted(vs: &HnswVacuumState) {
         );
         pg_sys::LockBufferForCleanup(buf);
 
-        let state = pg_sys::GenericXLogStart(vs.index);
-        let page = pg_sys::GenericXLogRegisterBuffer(state, buf, 0);
+        let mut state = pg_sys::GenericXLogStart(vs.index);
+        let mut page = pg_sys::GenericXLogRegisterBuffer(state, buf, 0);
         let maxoffno = pg_sys::PageGetMaxOffsetNumber(page);
 
         let mut offno: pg_sys::OffsetNumber = 1;
@@ -705,20 +682,11 @@ unsafe fn mark_deleted(vs: &HnswVacuumState) {
             let neighbor_page = pg_sys::ItemPointerGetBlockNumber(&(*etup).neighbortid);
             let neighbor_offno = pg_sys::ItemPointerGetOffsetNumber(&(*etup).neighbortid);
 
-            if neighbor_page == blkno {
-                // Same page: update both in one xlog entry
-                let n_item_id = pg_sys::PageGetItemId(page, neighbor_offno);
-                let ntup = pg_sys::PageGetItem(page, n_item_id) as *mut HnswNeighborTupleData;
-                let count = (*ntup).count as usize;
-                let tids_base = (ntup as *mut u8).add(std::mem::size_of::<HnswNeighborTupleData>())
-                    as *mut pg_sys::ItemPointerData;
-                for i in 0..count {
-                    pg_sys::ItemPointerSetInvalid(&mut *tids_base.add(i));
-                }
-                (*etup).version = bump_version((*etup).version);
-                (*ntup).version = (*etup).version;
+            let (nbuf, npage) = if neighbor_page == blkno {
+                // Same page — use the current buffer and page
+                (buf, page)
             } else {
-                // Different page: register neighbor buffer in same xlog
+                // Different page — register neighbor buffer in same xlog
                 let nbuf = pg_sys::ReadBufferExtended(
                     vs.index,
                     pg_sys::ForkNumber::MAIN_FORKNUM,
@@ -728,153 +696,20 @@ unsafe fn mark_deleted(vs: &HnswVacuumState) {
                 );
                 pg_sys::LockBuffer(nbuf, pg_sys::BUFFER_LOCK_EXCLUSIVE as i32);
                 let npage = pg_sys::GenericXLogRegisterBuffer(state, nbuf, 0);
+                (nbuf, npage)
+            };
 
-                let n_item_id = pg_sys::PageGetItemId(npage, neighbor_offno);
-                let ntup = pg_sys::PageGetItem(npage, n_item_id) as *mut HnswNeighborTupleData;
-                let count = (*ntup).count as usize;
-                let tids_base = (ntup as *mut u8).add(std::mem::size_of::<HnswNeighborTupleData>())
-                    as *mut pg_sys::ItemPointerData;
-                for i in 0..count {
-                    pg_sys::ItemPointerSetInvalid(&mut *tids_base.add(i));
-                }
-                (*etup).version = bump_version((*etup).version);
-                (*ntup).version = (*etup).version;
-
-                // Commit the xlog for both pages, then re-register element
-                // page for remaining tuples.
-                pg_sys::GenericXLogFinish(state);
-                pg_sys::UnlockReleaseBuffer(nbuf);
-
-                // Mark element as deleted
-                (*etup).deleted = 1;
-                let data_ptr = (etup as *mut u8).add(std::mem::size_of::<HnswElementTupleData>());
-                let varlena_size = (*(data_ptr as *const u32) >> 2) as usize;
-                if varlena_size > 0 {
-                    std::ptr::write_bytes(data_ptr, 0, varlena_size);
-                }
-
-                if insert_page == pg_sys::InvalidBlockNumber {
-                    insert_page = blkno;
-                }
-
-                // Re-open xlog for remaining tuples on this page
-                let state = pg_sys::GenericXLogStart(vs.index);
-                let page = pg_sys::GenericXLogRegisterBuffer(state, buf, 0);
-
-                // Process remaining tuples; re-read maxoffno from fresh page
-                offno += 1;
-                let mut has_more_deletes = false;
-                while offno <= maxoffno {
-                    let item_id = pg_sys::PageGetItemId(page, offno);
-                    let etup2 = pg_sys::PageGetItem(page, item_id) as *mut HnswElementTupleData;
-
-                    if (*etup2).type_ != HNSW_ELEMENT_TUPLE_TYPE
-                        || (*etup2).deleted != 0
-                        || pg_sys::ItemPointerIsValid(&(*etup2).heaptids[0])
-                    {
-                        if (*etup2).type_ == HNSW_ELEMENT_TUPLE_TYPE
-                            && (*etup2).deleted != 0
-                            && insert_page == pg_sys::InvalidBlockNumber
-                        {
-                            insert_page = blkno;
-                        }
-                        offno += 1;
-                        continue;
-                    }
-
-                    // Another element to delete on this page
-                    has_more_deletes = true;
-                    break;
-                }
-
-                if has_more_deletes {
-                    // Abort current state and restart the outer loop for
-                    // this page to handle cross-page neighbor cases cleanly
-                    pg_sys::GenericXLogAbort(state);
-                    // Don't advance blkno — redo this page
-                    pg_sys::UnlockReleaseBuffer(buf);
-
-                    // Actually we need to re-acquire the buffer with cleanup lock
-                    let buf2 = pg_sys::ReadBufferExtended(
-                        vs.index,
-                        pg_sys::ForkNumber::MAIN_FORKNUM,
-                        blkno,
-                        pg_sys::ReadBufferMode::RBM_NORMAL,
-                        vs.bas,
-                    );
-                    pg_sys::LockBufferForCleanup(buf2);
-                    let state2 = pg_sys::GenericXLogStart(vs.index);
-                    let page2 = pg_sys::GenericXLogRegisterBuffer(state2, buf2, 0);
-
-                    // Continue processing from where we left off
-                    while offno <= maxoffno {
-                        let item_id = pg_sys::PageGetItemId(page2, offno);
-                        let etup2 =
-                            pg_sys::PageGetItem(page2, item_id) as *mut HnswElementTupleData;
-
-                        if (*etup2).type_ != HNSW_ELEMENT_TUPLE_TYPE {
-                            offno += 1;
-                            continue;
-                        }
-                        if (*etup2).deleted != 0 {
-                            if insert_page == pg_sys::InvalidBlockNumber {
-                                insert_page = blkno;
-                            }
-                            offno += 1;
-                            continue;
-                        }
-                        if pg_sys::ItemPointerIsValid(&(*etup2).heaptids[0]) {
-                            offno += 1;
-                            continue;
-                        }
-
-                        let np = pg_sys::ItemPointerGetBlockNumber(&(*etup2).neighbortid);
-                        let no = pg_sys::ItemPointerGetOffsetNumber(&(*etup2).neighbortid);
-
-                        if np == blkno {
-                            let ni = pg_sys::PageGetItemId(page2, no);
-                            let nt = pg_sys::PageGetItem(page2, ni) as *mut HnswNeighborTupleData;
-                            let cnt = (*nt).count as usize;
-                            let tb = (nt as *mut u8)
-                                .add(std::mem::size_of::<HnswNeighborTupleData>())
-                                as *mut pg_sys::ItemPointerData;
-                            for i in 0..cnt {
-                                pg_sys::ItemPointerSetInvalid(&mut *tb.add(i));
-                            }
-                            (*etup2).version = bump_version((*etup2).version);
-                            (*nt).version = (*etup2).version;
-                        }
-                        // Cross-page neighbors already handled by first pass
-
-                        (*etup2).deleted = 1;
-                        let dp =
-                            (etup2 as *mut u8).add(std::mem::size_of::<HnswElementTupleData>());
-                        let vs2 = (*(dp as *const u32) >> 2) as usize;
-                        if vs2 > 0 {
-                            std::ptr::write_bytes(dp, 0, vs2);
-                        }
-
-                        if insert_page == pg_sys::InvalidBlockNumber {
-                            insert_page = blkno;
-                        }
-
-                        offno += 1;
-                    }
-
-                    blkno = (*hnsw_page_get_opaque(page2)).nextblkno;
-                    pg_sys::GenericXLogAbort(state2);
-                    pg_sys::UnlockReleaseBuffer(buf2);
-                    continue; // Continue outer while loop
-                }
-
-                // No more deletes on this page
-                blkno = (*hnsw_page_get_opaque(page)).nextblkno;
-                pg_sys::GenericXLogAbort(state);
-                pg_sys::UnlockReleaseBuffer(buf);
-                continue; // Continue outer while loop
+            // Clear neighbor TIDs
+            let n_item_id = pg_sys::PageGetItemId(npage, neighbor_offno);
+            let ntup = pg_sys::PageGetItem(npage, n_item_id) as *mut HnswNeighborTupleData;
+            let count = (*ntup).count as usize;
+            let tids_base = (ntup as *mut u8).add(std::mem::size_of::<HnswNeighborTupleData>())
+                as *mut pg_sys::ItemPointerData;
+            for i in 0..count {
+                pg_sys::ItemPointerSetInvalid(&mut *tids_base.add(i));
             }
 
-            // Same-page case: mark element as deleted
+            // Mark element as deleted and zero its data
             (*etup).deleted = 1;
             let data_ptr = (etup as *mut u8).add(std::mem::size_of::<HnswElementTupleData>());
             let varlena_size = (*(data_ptr as *const u32) >> 2) as usize;
@@ -882,15 +717,23 @@ unsafe fn mark_deleted(vs: &HnswVacuumState) {
                 std::ptr::write_bytes(data_ptr, 0, varlena_size);
             }
 
+            // Increment version
+            (*etup).version = bump_version((*etup).version);
+            (*ntup).version = (*etup).version;
+
+            // Commit xlog for both pages
+            pg_sys::GenericXLogFinish(state);
+            if nbuf != buf {
+                pg_sys::UnlockReleaseBuffer(nbuf);
+            }
+
             if insert_page == pg_sys::InvalidBlockNumber {
                 insert_page = blkno;
             }
 
-            // Commit and re-open xlog for next tuple on this page
-            pg_sys::GenericXLogFinish(state);
-            let state = pg_sys::GenericXLogStart(vs.index);
-            let _page = pg_sys::GenericXLogRegisterBuffer(state, buf, 0);
-            let _ = state; // Suppress warning; used implicitly for remaining tuples
+            // Re-open xlog for remaining tuples on this page
+            state = pg_sys::GenericXLogStart(vs.index);
+            page = pg_sys::GenericXLogRegisterBuffer(state, buf, 0);
 
             offno += 1;
         }

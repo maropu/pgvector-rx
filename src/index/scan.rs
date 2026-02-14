@@ -168,7 +168,7 @@ pub(crate) unsafe fn load_element(
     let item_id = pg_sys::PageGetItemId(page, offno);
     let etup = pg_sys::PageGetItem(page, item_id) as *const HnswElementTupleData;
 
-    if (*etup).type_ != HNSW_ELEMENT_TUPLE_TYPE {
+    if (*etup).type_ != HNSW_ELEMENT_TUPLE_TYPE || (*etup).deleted != 0 {
         pg_sys::UnlockReleaseBuffer(buf);
         return None;
     }
@@ -296,6 +296,7 @@ pub(crate) unsafe fn search_layer_disk(
     visited: Option<&mut HashSet<(pg_sys::BlockNumber, pg_sys::OffsetNumber)>>,
     mut discarded: Option<&mut BinaryHeap<NearestSC>>,
     add_entry_to_visited: bool,
+    skip_count: Option<&HashSet<(pg_sys::BlockNumber, pg_sys::OffsetNumber)>>,
 ) -> Vec<ScanCandidate> {
     // Use caller-supplied visited set or create a local one.
     let mut local_visited: HashSet<(pg_sys::BlockNumber, pg_sys::OffsetNumber)> =
@@ -311,9 +312,13 @@ pub(crate) unsafe fn search_layer_disk(
         if add_entry_to_visited {
             visited.insert((ep.blkno, ep.offno));
         }
+        let should_count =
+            skip_count.is_none_or(|sc| !sc.contains(&(ep.blkno, ep.offno)));
         candidates.push(NearestSC(ep.clone()));
         results.push(FurthestSC(ep));
-        w_len += 1;
+        if should_count {
+            w_len += 1;
+        }
     }
 
     while let Some(NearestSC(c)) = candidates.pop() {
@@ -393,8 +398,12 @@ pub(crate) unsafe fn search_layer_disk(
             }
 
             candidates.push(NearestSC(e.clone()));
-            results.push(FurthestSC(e));
-            w_len += 1;
+            results.push(FurthestSC(e.clone()));
+            let should_count =
+                skip_count.is_none_or(|sc| !sc.contains(&(e.blkno, e.offno)));
+            if should_count {
+                w_len += 1;
+            }
 
             if w_len > ef {
                 let evicted = results.pop().unwrap();
@@ -480,6 +489,7 @@ unsafe fn get_scan_items(
             None,
             None,
             true,
+            None,
         );
         ep_list = if w.is_empty() {
             return (Vec::new(), m);
@@ -501,6 +511,7 @@ unsafe fn get_scan_items(
         visited,
         discarded,
         true,
+        None,
     );
     (results, m)
 }
@@ -548,6 +559,7 @@ unsafe fn resume_scan_items(
         Some(visited),
         Some(discarded),
         false,
+        None,
     )
 }
 

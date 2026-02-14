@@ -1,0 +1,100 @@
+use strict;
+use warnings FATAL => 'all';
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
+use Test::More;
+
+my $node;
+my @queries = ();
+my @expected;
+my $limit = 20;
+my $array_sql = join(",", ('random() * random()') x 3);
+
+sub test_recall
+{
+	my ($min, $operator) = @_;
+	my $correct = 0;
+	my $total = 0;
+
+	my $explain = $node->safe_psql("postgres", qq(
+		SET enable_seqscan = off;
+		EXPLAIN ANALYZE SELECT i FROM tst ORDER BY v $operator '$queries[0]' LIMIT $limit;
+	));
+	like($explain, qr/Index Scan/);
+
+	for my $i (0 .. $#queries)
+	{
+		my $actual = $node->safe_psql("postgres", qq(
+			SET enable_seqscan = off;
+			SELECT i FROM tst ORDER BY v $operator '$queries[$i]' LIMIT $limit;
+		));
+		my @actual_ids = split("\n", $actual);
+		my %actual_set = map { $_ => 1 } @actual_ids;
+
+		my @expected_ids = split("\n", $expected[$i]);
+
+		foreach (@expected_ids)
+		{
+			if (exists($actual_set{$_}))
+			{
+				$correct++;
+			}
+			$total++;
+		}
+	}
+
+	cmp_ok($correct / $total, ">=", $min, $operator);
+}
+
+# Initialize node
+$node = PostgreSQL::Test::Cluster->new('node');
+$node->init;
+$node->start;
+
+# Create table
+$node->safe_psql("postgres", "CREATE EXTENSION pgvector_rx;");
+$node->safe_psql("postgres", "CREATE TABLE tst (i int4, v vector(3));");
+$node->safe_psql("postgres",
+	"INSERT INTO tst SELECT i, ARRAY[$array_sql] FROM generate_series(1, 10000) i;"
+);
+
+# Generate queries
+for (1 .. 20)
+{
+	my $r1 = rand();
+	my $r2 = rand();
+	my $r3 = rand();
+	push(@queries, "[$r1,$r2,$r3]");
+}
+
+# Check each index type (sequential build only)
+my @operators = ("<->", "<#>", "<=>", "<+>");
+my @opclasses = ("vector_l2_ops", "vector_ip_ops", "vector_cosine_ops", "vector_l1_ops");
+
+for my $i (0 .. $#operators)
+{
+	my $operator = $operators[$i];
+	my $opclass = $opclasses[$i];
+
+	# Get exact results
+	@expected = ();
+	foreach (@queries)
+	{
+		my $res = $node->safe_psql("postgres", "SELECT i FROM tst ORDER BY v $operator '$_' LIMIT $limit;");
+		push(@expected, $res);
+	}
+
+	# Build index serially
+	$node->safe_psql("postgres", qq(
+		SET max_parallel_maintenance_workers = 0;
+		CREATE INDEX idx ON tst USING hnsw (v $opclass);
+	));
+
+	# Test approximate results
+	my $min = $operator eq "<#>" ? 0.97 : 0.99;
+	test_recall($min, $operator);
+
+	$node->safe_psql("postgres", "DROP INDEX idx;");
+}
+
+done_testing();
