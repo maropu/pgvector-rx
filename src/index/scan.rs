@@ -166,6 +166,14 @@ pub(crate) unsafe fn load_element(
     let page = buffer_get_page(buf);
 
     let item_id = pg_sys::PageGetItemId(page, offno);
+
+    // Safety check: skip items without storage (assert-enabled PG builds check this)
+    let maxoffno = pg_sys::PageGetMaxOffsetNumber(page);
+    if offno > maxoffno || (*item_id).lp_len() == 0 || (*item_id).lp_flags() != pg_sys::LP_NORMAL {
+        pg_sys::UnlockReleaseBuffer(buf);
+        return None;
+    }
+
     let etup = pg_sys::PageGetItem(page, item_id) as *const HnswElementTupleData;
 
     if (*etup).type_ != HNSW_ELEMENT_TUPLE_TYPE || (*etup).deleted != 0 {
@@ -241,6 +249,13 @@ pub(crate) unsafe fn load_neighbor_tids(
     let page = buffer_get_page(buf);
 
     let item_id = pg_sys::PageGetItemId(page, neighbor_offno);
+
+    // Safety check for assert-enabled builds
+    if (*item_id).lp_flags() != pg_sys::LP_NORMAL {
+        pg_sys::UnlockReleaseBuffer(buf);
+        return None;
+    }
+
     let ntup = pg_sys::PageGetItem(page, item_id) as *const HnswNeighborTupleData;
 
     // Verify tuple validity

@@ -206,6 +206,10 @@ unsafe fn add_element_on_disk(
     let mut new_insert_page = pg_sys::InvalidBlockNumber;
 
     loop {
+        debug_assert!(
+            current_page != HNSW_METAPAGE_BLKNO,
+            "pgvector-rx: attempting to insert into meta page"
+        );
         let buf = pg_sys::ReadBuffer(index, current_page);
         pg_sys::LockBuffer(buf, pg_sys::BUFFER_LOCK_EXCLUSIVE as i32);
 
@@ -1238,6 +1242,12 @@ pub unsafe extern "C-unwind" fn aminsert(
     // Detoast the datum (type-agnostic: works for vector, bit, halfvec, etc.)
     let raw_datum = *values.add(0);
     let mut detoasted = pg_sys::pg_detoast_datum(raw_datum.cast_mut_ptr());
+
+    // Type-specific value validation (e.g., sparsevec nnz limit).
+    let check_value_fn = crate::index::build::get_check_value_fn(index_relation);
+    if let Some(check_fn) = check_value_fn {
+        check_fn(detoasted as *const _);
+    }
 
     // Check norm for cosine distance (skip zero-norm vectors)
     let norm_fmgr = if (*index_relation)

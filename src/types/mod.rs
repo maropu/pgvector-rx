@@ -3,4 +3,5 @@
 pub mod bitvec;
 pub mod halfvec;
 pub mod hnsw;
+pub mod sparsevec;
 pub mod vector;

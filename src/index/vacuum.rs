@@ -140,6 +140,13 @@ unsafe fn remove_heap_tids(vs: &mut HnswVacuumState) {
         let mut offno: pg_sys::OffsetNumber = 1;
         while offno <= maxoffno {
             let item_id = pg_sys::PageGetItemId(page, offno);
+
+            // Skip items without storage (e.g., after PageIndexTupleOverwrite)
+            if (*item_id).lp_flags() != pg_sys::LP_NORMAL {
+                offno += 1;
+                continue;
+            }
+
             let etup = pg_sys::PageGetItem(page, item_id) as *mut HnswElementTupleData;
 
             // Skip neighbor tuples
@@ -230,6 +237,13 @@ unsafe fn needs_updated(vs: &HnswVacuumState, sc: &ScanCandidate) -> bool {
     let page = buffer_get_page(buf);
 
     let item_id = pg_sys::PageGetItemId(page, sc.neighbor_offno);
+
+    // Safety check for assert-enabled builds
+    if (*item_id).lp_flags() != pg_sys::LP_NORMAL {
+        pg_sys::UnlockReleaseBuffer(buf);
+        return false;
+    }
+
     let ntup = pg_sys::PageGetItem(page, item_id) as *const HnswNeighborTupleData;
 
     let count = (*ntup).count as usize;
@@ -299,6 +313,13 @@ unsafe fn repair_graph_element(
     pg_sys::LockBuffer(buf, pg_sys::BUFFER_LOCK_SHARE as i32);
     let page = buffer_get_page(buf);
     let item_id = pg_sys::PageGetItemId(page, element_offno);
+
+    // Safety check for assert-enabled builds
+    if (*item_id).lp_flags() != pg_sys::LP_NORMAL {
+        pg_sys::UnlockReleaseBuffer(buf);
+        return;
+    }
+
     let etup = pg_sys::PageGetItem(page, item_id) as *const HnswElementTupleData;
     let version = (*etup).version;
     let neighbor_page = pg_sys::ItemPointerGetBlockNumber(&(*etup).neighbortid);
@@ -371,10 +392,11 @@ unsafe fn repair_graph_element(
 
     if !pg_sys::PageIndexTupleOverwrite(npage, neighbor_offno, ntup_buf as pg_sys::Item, ntup_size)
     {
-        pgrx::error!(
-            "pgvector-rx: failed to overwrite neighbor tuple in \"{}\"",
-            std::ffi::CStr::from_ptr((*(*vs.index).rd_rel).relname.data.as_ptr()).to_string_lossy()
-        );
+        pg_sys::GenericXLogAbort(nstate);
+        pg_sys::UnlockReleaseBuffer(nbuf);
+        pg_sys::pfree(ntup_buf as *mut std::ffi::c_void);
+        pg_sys::pfree(vec_copy as *mut std::ffi::c_void);
+        pgrx::error!("pgvector-rx: failed to overwrite neighbor tuple");
     }
 
     pg_sys::GenericXLogFinish(nstate);
@@ -547,6 +569,13 @@ unsafe fn repair_graph(vs: &mut HnswVacuumState) {
         let mut offno: pg_sys::OffsetNumber = 1;
         while offno <= maxoffno {
             let item_id = pg_sys::PageGetItemId(page, offno);
+
+            // Skip items without storage
+            if (*item_id).lp_flags() != pg_sys::LP_NORMAL {
+                offno += 1;
+                continue;
+            }
+
             let etup = pg_sys::PageGetItem(page, item_id) as *const HnswElementTupleData;
 
             if (*etup).type_ == HNSW_ELEMENT_TUPLE_TYPE
@@ -658,6 +687,13 @@ unsafe fn mark_deleted(vs: &HnswVacuumState) {
         let mut offno: pg_sys::OffsetNumber = 1;
         while offno <= maxoffno {
             let item_id = pg_sys::PageGetItemId(page, offno);
+
+            // Skip items without storage
+            if (*item_id).lp_flags() != pg_sys::LP_NORMAL {
+                offno += 1;
+                continue;
+            }
+
             let etup = pg_sys::PageGetItem(page, item_id) as *mut HnswElementTupleData;
 
             if (*etup).type_ != HNSW_ELEMENT_TUPLE_TYPE {

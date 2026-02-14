@@ -118,6 +118,10 @@ unsafe fn hnsw_build_append_page(
 /// Function pointer for type-specific normalization.
 pub type NormalizeFn = unsafe fn(*const pg_sys::varlena) -> *const pg_sys::varlena;
 
+/// Function pointer for type-specific value validation.
+/// Returns without error if valid; panics via pgrx::error! if invalid.
+pub type CheckValueFn = Option<unsafe fn(*const pg_sys::varlena)>;
+
 /// Get the appropriate normalize function for the indexed type.
 ///
 /// If FUNCTION 3 (TYPE_INFO_PROC) exists in the opclass, the indexed type
@@ -146,6 +150,13 @@ pub unsafe fn get_normalize_fn(index: pg_sys::Relation) -> NormalizeFn {
                     v as *const crate::types::halfvec::HalfVecHeader,
                 ) as *const pg_sys::varlena
             }
+        } else if type_info.max_dimensions == crate::types::sparsevec::SPARSEVEC_MAX_DIM {
+            // Sparsevec type
+            |v| {
+                crate::types::sparsevec::sparsevec_l2_normalize_raw(
+                    v as *const crate::types::sparsevec::SparseVecHeader,
+                ) as *const pg_sys::varlena
+            }
         } else {
             // Default: vector normalize (for future types, add dispatch here)
             |v| {
@@ -160,6 +171,42 @@ pub unsafe fn get_normalize_fn(index: pg_sys::Relation) -> NormalizeFn {
             crate::types::vector::l2_normalize_raw(v as *const crate::types::vector::VectorHeader)
                 as *const pg_sys::varlena
         }
+    }
+}
+
+/// Get the appropriate check-value function for the indexed type.
+///
+/// For sparsevec, validates nnz <= HNSW_MAX_NNZ (1000).
+/// For other types, returns None (no extra validation needed).
+///
+/// # Safety
+/// `index` must be a valid, open index relation.
+pub unsafe fn get_check_value_fn(index: pg_sys::Relation) -> CheckValueFn {
+    let has_support = (*index)
+        .rd_support
+        .add(HNSW_TYPE_INFO_PROC as usize - 1)
+        .read()
+        != pg_sys::InvalidOid;
+
+    if has_support {
+        let procinfo = pg_sys::index_getprocinfo(index, 1, HNSW_TYPE_INFO_PROC);
+        let result = pg_sys::FunctionCall0Coll(procinfo, pg_sys::InvalidOid);
+        let type_info = &*(result.value() as *const crate::types::halfvec::HnswTypeInfo);
+        if type_info.max_dimensions == crate::types::sparsevec::SPARSEVEC_MAX_DIM {
+            Some(|v: *const pg_sys::varlena| {
+                let svec = v as *const crate::types::sparsevec::SparseVecHeader;
+                if (*svec).nnz > crate::hnsw_constants::HNSW_MAX_NNZ {
+                    pgrx::error!(
+                        "sparsevec cannot have more than {} non-zero elements for hnsw index",
+                        crate::hnsw_constants::HNSW_MAX_NNZ
+                    );
+                }
+            })
+        } else {
+            None
+        }
+    } else {
+        None
     }
 }
 
@@ -192,6 +239,8 @@ struct HnswBuildState {
     norm_fmgr: *mut pg_sys::FmgrInfo,
     /// Type-specific normalize function.
     normalize_fn: NormalizeFn,
+    /// Type-specific value check function (e.g., sparsevec nnz limit).
+    check_value_fn: CheckValueFn,
     /// Number of indexed tuples.
     ind_tuples: f64,
     /// Heap relation tuples (from scan).
@@ -243,6 +292,9 @@ impl HnswBuildState {
         // Get the type-specific normalize function.
         let normalize_fn = get_normalize_fn(index);
 
+        // Get the type-specific value check function.
+        let check_value_fn = get_check_value_fn(index);
+
         Self {
             elements: Vec::new(),
             values: Vec::new(),
@@ -257,6 +309,7 @@ impl HnswBuildState {
             collation,
             norm_fmgr,
             normalize_fn,
+            check_value_fn,
             ind_tuples: 0.0,
             rel_tuples: 0.0,
             index,
@@ -338,6 +391,11 @@ unsafe extern "C-unwind" fn build_callback(
     // Detoast the datum (type-agnostic: works for vector, bit, halfvec, etc.)
     let raw_datum = *values.add(0);
     let mut detoasted = pg_sys::pg_detoast_datum(raw_datum.cast_mut_ptr());
+
+    // Type-specific value validation (e.g., sparsevec nnz limit).
+    if let Some(check_fn) = bs.check_value_fn {
+        check_fn(detoasted as *const _);
+    }
 
     // Check norm for cosine distance (skip zero-norm vectors)
     // and normalize the vector when the norm function is present.
@@ -492,11 +550,20 @@ unsafe fn create_meta_page(bs: &HnswBuildState) {
 /// # Safety
 /// `bs` must be valid with a built graph. Called during build.
 unsafe fn create_graph_pages(bs: &mut HnswBuildState) -> pg_sys::BlockNumber {
-    if bs.elements.is_empty() {
-        return pg_sys::InvalidBlockNumber;
-    }
-
     let max_size = hnsw_max_size();
+
+    // Always create the first data page (head page), even for empty tables,
+    // so that insert_page always points to a valid HNSW page (not P_NEW).
+    let mut buf = hnsw_new_buffer(bs.index, bs.fork_num);
+    let mut page = buffer_get_page(buf);
+    hnsw_init_page(buf, page);
+
+    if bs.elements.is_empty() {
+        let insert_page = pg_sys::BufferGetBlockNumber(buf);
+        pg_sys::MarkBufferDirty(buf);
+        pg_sys::UnlockReleaseBuffer(buf);
+        return insert_page;
+    }
 
     // Prepare element and neighbor tuple buffers (max possible size)
     let alloc_size = max_size;
@@ -505,11 +572,6 @@ unsafe fn create_graph_pages(bs: &mut HnswBuildState) -> pg_sys::BlockNumber {
 
     // Allocate disk location tracking
     bs.disk_locs = vec![DiskLocation::default(); bs.elements.len()];
-
-    // Prepare first data page
-    let mut buf = hnsw_new_buffer(bs.index, bs.fork_num);
-    let mut page = buffer_get_page(buf);
-    hnsw_init_page(buf, page);
 
     for idx in 0..bs.elements.len() {
         let level = bs.elements[idx].level;
@@ -710,10 +772,6 @@ unsafe fn write_neighbor_tuples(bs: &HnswBuildState) {
 /// # Safety
 /// Meta page must already exist at block 0.
 unsafe fn update_meta_page(bs: &HnswBuildState, insert_page: pg_sys::BlockNumber) {
-    if bs.entry_point.is_none() {
-        return;
-    }
-
     let buf = pg_sys::ReadBufferExtended(
         bs.index,
         bs.fork_num,
