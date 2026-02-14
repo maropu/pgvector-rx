@@ -21,18 +21,28 @@ use crate::types::hnsw::*;
 /// # Safety
 /// `buffer` must be a valid pinned buffer.
 #[inline]
-unsafe fn buffer_get_page(buffer: pg_sys::Buffer) -> pg_sys::Page {
+pub(crate) unsafe fn buffer_get_page(buffer: pg_sys::Buffer) -> pg_sys::Page {
     pg_sys::BufferBlocks.add((buffer as usize - 1) * pg_sys::BLCKSZ as usize) as pg_sys::Page
 }
 
-/// Get a pointer to the meta page data area.
+/// Get a pointer to the meta page data area (const).
 ///
 /// # Safety
 /// `page` must be a valid HNSW meta page.
 #[inline]
-unsafe fn hnsw_page_get_meta(page: pg_sys::Page) -> *const HnswMetaPageData {
+pub(crate) unsafe fn hnsw_page_get_meta(page: pg_sys::Page) -> *const HnswMetaPageData {
     let header_size = std::mem::size_of::<pg_sys::PageHeaderData>();
     (page as *const u8).add(header_size) as *const HnswMetaPageData
+}
+
+/// Get a mutable pointer to the meta page data area.
+///
+/// # Safety
+/// `page` must be a valid HNSW meta page with exclusive lock.
+#[inline]
+pub(crate) unsafe fn hnsw_page_get_meta_mut(page: pg_sys::Page) -> *mut HnswMetaPageData {
+    let header_size = std::mem::size_of::<pg_sys::PageHeaderData>();
+    (page as *mut u8).add(header_size) as *mut HnswMetaPageData
 }
 
 // ---------------------------------------------------------------------------
@@ -41,20 +51,20 @@ unsafe fn hnsw_page_get_meta(page: pg_sys::Page) -> *const HnswMetaPageData {
 
 /// A search candidate with distance, element block/offset, and loaded data.
 #[derive(Debug, Clone)]
-struct ScanCandidate {
-    distance: f64,
-    blkno: pg_sys::BlockNumber,
-    offno: pg_sys::OffsetNumber,
+pub(crate) struct ScanCandidate {
+    pub(crate) distance: f64,
+    pub(crate) blkno: pg_sys::BlockNumber,
+    pub(crate) offno: pg_sys::OffsetNumber,
     /// Element level (loaded from disk).
-    level: i32,
+    pub(crate) level: i32,
     /// Neighbor page block number.
-    neighbor_page: pg_sys::BlockNumber,
+    pub(crate) neighbor_page: pg_sys::BlockNumber,
     /// Neighbor tuple offset.
-    neighbor_offno: pg_sys::OffsetNumber,
+    pub(crate) neighbor_offno: pg_sys::OffsetNumber,
     /// Heap TIDs for this element.
-    heaptids: Vec<pg_sys::ItemPointerData>,
+    pub(crate) heaptids: Vec<pg_sys::ItemPointerData>,
     /// Version of the element tuple.
-    version: u8,
+    pub(crate) version: u8,
 }
 
 // Nearest-first ordering for BinaryHeap (min-heap).
@@ -112,7 +122,7 @@ impl Ord for FurthestSC {
 ///
 /// # Safety
 /// `index` must be a valid, open index relation.
-unsafe fn get_meta_page_info(
+pub(crate) unsafe fn get_meta_page_info(
     index: pg_sys::Relation,
 ) -> (i32, pg_sys::BlockNumber, pg_sys::OffsetNumber, i32) {
     let buf = pg_sys::ReadBuffer(index, HNSW_METAPAGE_BLKNO);
@@ -141,7 +151,7 @@ unsafe fn get_meta_page_info(
 /// # Safety
 /// `index` must be valid. `query_datum`, `dist_fmgr`, `collation` must be
 /// valid for calling the distance function.
-unsafe fn load_element(
+pub(crate) unsafe fn load_element(
     index: pg_sys::Relation,
     blkno: pg_sys::BlockNumber,
     offno: pg_sys::OffsetNumber,
@@ -214,7 +224,7 @@ unsafe fn load_element(
 ///
 /// # Safety
 /// `index` must be valid.
-unsafe fn load_neighbor_tids(
+pub(crate) unsafe fn load_neighbor_tids(
     index: pg_sys::Relation,
     neighbor_page: pg_sys::BlockNumber,
     neighbor_offno: pg_sys::OffsetNumber,
@@ -265,7 +275,7 @@ unsafe fn load_neighbor_tids(
 /// # Safety
 /// All index/query state must be valid.
 #[allow(clippy::too_many_arguments)]
-unsafe fn search_layer_disk(
+pub(crate) unsafe fn search_layer_disk(
     index: pg_sys::Relation,
     entry_points: Vec<ScanCandidate>,
     ef: usize,
