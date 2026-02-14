@@ -22,6 +22,8 @@ pg_test = []
 
 [dependencies]
 pgrx = "=0.17.0"
+paste = "1"
+ryu = "1"
 
 [dev-dependencies]
 pgrx-tests = "=0.17.0"
