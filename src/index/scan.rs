@@ -9,6 +9,7 @@ use pgrx::pg_guard;
 use pgrx::pg_sys;
 
 use crate::hnsw_constants::*;
+use crate::index::options::{HnswIterativeScan, HNSW_ITERATIVE_SCAN, HNSW_MAX_SCAN_TUPLES};
 use crate::types::hnsw::*;
 
 // ---------------------------------------------------------------------------
@@ -68,7 +69,7 @@ pub(crate) struct ScanCandidate {
 }
 
 // Nearest-first ordering for BinaryHeap (min-heap).
-struct NearestSC(ScanCandidate);
+pub(crate) struct NearestSC(ScanCandidate);
 
 impl PartialEq for NearestSC {
     fn eq(&self, other: &Self) -> bool {
@@ -272,6 +273,14 @@ pub(crate) unsafe fn load_neighbor_tids(
 
 /// Search a single HNSW layer on disk.
 ///
+/// When `discarded` is `Some`, candidates that are rejected (too far once
+/// we have `ef` results) are pushed into that heap for later iterative
+/// scan resumption. When `visited` is `Some`, the caller-owned visited
+/// set is used and updated (shared across resume iterations).
+///
+/// `add_entry_to_visited` controls whether entry points are added to the
+/// visited set (true for initial search, false for resume).
+///
 /// # Safety
 /// All index/query state must be valid.
 #[allow(clippy::too_many_arguments)]
@@ -284,9 +293,14 @@ pub(crate) unsafe fn search_layer_disk(
     query_datum: pg_sys::Datum,
     dist_fmgr: *mut pg_sys::FmgrInfo,
     collation: pg_sys::Oid,
+    visited: Option<&mut HashSet<(pg_sys::BlockNumber, pg_sys::OffsetNumber)>>,
+    mut discarded: Option<&mut BinaryHeap<NearestSC>>,
+    add_entry_to_visited: bool,
 ) -> Vec<ScanCandidate> {
-    let mut visited: HashSet<(pg_sys::BlockNumber, pg_sys::OffsetNumber)> =
+    // Use caller-supplied visited set or create a local one.
+    let mut local_visited: HashSet<(pg_sys::BlockNumber, pg_sys::OffsetNumber)> =
         HashSet::with_capacity(ef * m as usize * 2);
+    let visited = visited.unwrap_or(&mut local_visited);
 
     let mut candidates: BinaryHeap<NearestSC> = BinaryHeap::new();
     let mut results: BinaryHeap<FurthestSC> = BinaryHeap::new();
@@ -294,7 +308,9 @@ pub(crate) unsafe fn search_layer_disk(
 
     // Initialize with entry points
     for ep in entry_points {
-        visited.insert((ep.blkno, ep.offno));
+        if add_entry_to_visited {
+            visited.insert((ep.blkno, ep.offno));
+        }
         candidates.push(NearestSC(ep.clone()));
         results.push(FurthestSC(ep));
         w_len += 1;
@@ -303,6 +319,10 @@ pub(crate) unsafe fn search_layer_disk(
     while let Some(NearestSC(c)) = candidates.pop() {
         let f_dist = results.peek().map(|f| f.0.distance).unwrap_or(f64::MAX);
         if c.distance > f_dist {
+            // Save rejected candidate for iterative scan
+            if let Some(ref mut disc) = discarded {
+                disc.push(NearestSC(c));
+            }
             break;
         }
 
@@ -332,8 +352,7 @@ pub(crate) unsafe fn search_layer_disk(
             let always_add = w_len < ef;
             let f_dist = results.peek().map(|f| f.0.distance).unwrap_or(f64::MAX);
 
-            // Load element; skip if too far and we have enough results
-            let max_dist = if always_add { None } else { Some(f_dist) };
+            // Load element
             let e = match load_element(
                 index,
                 n_blkno,
@@ -341,10 +360,31 @@ pub(crate) unsafe fn search_layer_disk(
                 query_datum,
                 dist_fmgr,
                 collation,
-                max_dist,
+                if always_add { None } else { Some(f_dist) },
             ) {
                 Some(e) => e,
-                None => continue,
+                None => {
+                    // For iterative scan, load without distance filter to
+                    // collect as discarded
+                    if !always_add {
+                        if let Some(ref mut disc) = discarded {
+                            if let Some(e_full) = load_element(
+                                index,
+                                n_blkno,
+                                n_offno,
+                                query_datum,
+                                dist_fmgr,
+                                collation,
+                                None,
+                            ) {
+                                if e_full.level >= layer {
+                                    disc.push(NearestSC(e_full));
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
             };
 
             // Skip if element level is below current layer
@@ -357,9 +397,21 @@ pub(crate) unsafe fn search_layer_disk(
             w_len += 1;
 
             if w_len > ef {
-                results.pop();
+                let evicted = results.pop().unwrap();
                 w_len -= 1;
+
+                // Save evicted candidate for iterative scan
+                if let Some(ref mut disc) = discarded {
+                    disc.push(NearestSC(evicted.0));
+                }
             }
+        }
+    }
+
+    // Save remaining candidates to discarded heap
+    if let Some(ref mut disc) = discarded {
+        while let Some(NearestSC(c)) = candidates.pop() {
+            disc.push(NearestSC(c));
         }
     }
 
@@ -375,20 +427,26 @@ pub(crate) unsafe fn search_layer_disk(
 
 /// Run the full multi-layer scan (Algorithm 5 from the HNSW paper).
 ///
+/// When `iterative` is true, the caller-owned `visited` and `discarded`
+/// are populated for later use by `resume_scan_items`.
+///
 /// # Safety
 /// All index/query state must be valid.
+#[allow(clippy::too_many_arguments)]
 unsafe fn get_scan_items(
     index: pg_sys::Relation,
     query_datum: pg_sys::Datum,
     dist_fmgr: *mut pg_sys::FmgrInfo,
     collation: pg_sys::Oid,
     ef_search: usize,
-) -> Vec<ScanCandidate> {
+    visited: Option<&mut HashSet<(pg_sys::BlockNumber, pg_sys::OffsetNumber)>>,
+    discarded: Option<&mut BinaryHeap<NearestSC>>,
+) -> (Vec<ScanCandidate>, i32) {
     let (m, entry_blkno, entry_offno, _entry_level) = get_meta_page_info(index);
 
     // Empty index
     if entry_blkno == pg_sys::InvalidBlockNumber {
-        return Vec::new();
+        return (Vec::new(), m);
     }
 
     // Load entry point
@@ -402,7 +460,7 @@ unsafe fn get_scan_items(
         None,
     ) {
         Some(ep) => ep,
-        None => return Vec::new(),
+        None => return (Vec::new(), m),
     };
 
     let ep_level = ep.level;
@@ -410,16 +468,28 @@ unsafe fn get_scan_items(
 
     // Phase 1: greedy search from top layer down to layer 1
     for lc in (1..=ep_level).rev() {
-        let w = search_layer_disk(index, ep_list, 1, lc, m, query_datum, dist_fmgr, collation);
+        let w = search_layer_disk(
+            index,
+            ep_list,
+            1,
+            lc,
+            m,
+            query_datum,
+            dist_fmgr,
+            collation,
+            None,
+            None,
+            true,
+        );
         ep_list = if w.is_empty() {
-            return Vec::new();
+            return (Vec::new(), m);
         } else {
             vec![w.into_iter().last().unwrap()]
         };
     }
 
     // Phase 2: search ground layer with ef_search
-    search_layer_disk(
+    let results = search_layer_disk(
         index,
         ep_list,
         ef_search,
@@ -428,6 +498,56 @@ unsafe fn get_scan_items(
         query_datum,
         dist_fmgr,
         collation,
+        visited,
+        discarded,
+        true,
+    );
+    (results, m)
+}
+
+/// Resume an iterative scan by re-entering the ground layer with
+/// discarded candidates as entry points.
+///
+/// # Safety
+/// All index/query state must be valid.
+#[allow(clippy::too_many_arguments)]
+unsafe fn resume_scan_items(
+    index: pg_sys::Relation,
+    query_datum: pg_sys::Datum,
+    dist_fmgr: *mut pg_sys::FmgrInfo,
+    collation: pg_sys::Oid,
+    ef_search: usize,
+    m: i32,
+    visited: &mut HashSet<(pg_sys::BlockNumber, pg_sys::OffsetNumber)>,
+    discarded: &mut BinaryHeap<NearestSC>,
+) -> Vec<ScanCandidate> {
+    if discarded.is_empty() {
+        return Vec::new();
+    }
+
+    // Get next batch of candidates
+    let batch_size = ef_search;
+    let mut ep: Vec<ScanCandidate> = Vec::with_capacity(batch_size);
+    for _ in 0..batch_size {
+        if discarded.is_empty() {
+            break;
+        }
+        let NearestSC(sc) = discarded.pop().unwrap();
+        ep.push(sc);
+    }
+
+    search_layer_disk(
+        index,
+        ep,
+        batch_size,
+        0,
+        m,
+        query_datum,
+        dist_fmgr,
+        collation,
+        Some(visited),
+        Some(discarded),
+        false,
     )
 }
 
@@ -445,6 +565,20 @@ struct HnswScanState {
     collation: pg_sys::Oid,
     /// Result list sorted by distance (nearest last for pop).
     results: Vec<ScanCandidate>,
+    /// M parameter from the meta page (needed for resume).
+    m: i32,
+    /// Query datum (saved for resume).
+    query_datum: pg_sys::Datum,
+    /// Visited set (shared across iterative scan iterations).
+    visited: HashSet<(pg_sys::BlockNumber, pg_sys::OffsetNumber)>,
+    /// Discarded candidates heap for iterative scan.
+    discarded: BinaryHeap<NearestSC>,
+    /// Whether iterative scan state has been initialized.
+    iterative_initialized: bool,
+    /// Number of tuples returned so far (for max_scan_tuples limit).
+    tuples: i64,
+    /// Previous distance returned (for strict_order mode).
+    previous_distance: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -471,6 +605,13 @@ pub unsafe extern "C-unwind" fn ambeginscan(
         dist_fmgr,
         collation,
         results: Vec::new(),
+        m: 0,
+        query_datum: pg_sys::Datum::from(0usize),
+        visited: HashSet::new(),
+        discarded: BinaryHeap::new(),
+        iterative_initialized: false,
+        tuples: 0,
+        previous_distance: f64::NEG_INFINITY,
     });
 
     (*scan).opaque = Box::into_raw(state) as *mut std::ffi::c_void;
@@ -490,6 +631,11 @@ pub unsafe extern "C-unwind" fn amrescan(
     let so = &mut *((*scan).opaque as *mut HnswScanState);
     so.first = true;
     so.results.clear();
+    so.visited.clear();
+    so.discarded.clear();
+    so.iterative_initialized = false;
+    so.tuples = 0;
+    so.previous_distance = f64::NEG_INFINITY;
 
     if !keys.is_null() && (*scan).numberOfKeys > 0 {
         std::ptr::copy_nonoverlapping(
@@ -516,6 +662,8 @@ pub unsafe extern "C-unwind" fn amgettuple(
 ) -> bool {
     let so = &mut *((*scan).opaque as *mut HnswScanState);
 
+    let iterative_scan = HNSW_ITERATIVE_SCAN.get();
+
     if so.first {
         // Safety check: HNSW requires ORDER BY
         if (*scan).orderByData.is_null() {
@@ -523,7 +671,6 @@ pub unsafe extern "C-unwind" fn amgettuple(
         }
 
         // Requires MVCC-compliant snapshot
-        // IsMVCCSnapshot is a C macro: snapshot_type == SNAPSHOT_MVCC
         let snapshot = (*scan).xs_snapshot;
         if snapshot.is_null() || (*snapshot).snapshot_type != pg_sys::SnapshotType::SNAPSHOT_MVCC {
             pgrx::error!("non-MVCC snapshots are not supported with hnsw");
@@ -540,20 +687,85 @@ pub unsafe extern "C-unwind" fn amgettuple(
         // Get ef_search GUC value
         let ef_search = crate::index::options::HNSW_EF_SEARCH.get() as usize;
 
-        // Run the HNSW search
-        so.results = get_scan_items(
-            (*scan).indexRelation,
-            query_datum,
-            so.dist_fmgr,
-            so.collation,
-            ef_search,
-        );
+        // Determine if we need iterative scan state
+        let use_iterative = iterative_scan != HnswIterativeScan::Off;
 
+        // Run the HNSW search
+        let (results, m) = if use_iterative {
+            get_scan_items(
+                (*scan).indexRelation,
+                query_datum,
+                so.dist_fmgr,
+                so.collation,
+                ef_search,
+                Some(&mut so.visited),
+                Some(&mut so.discarded),
+            )
+        } else {
+            get_scan_items(
+                (*scan).indexRelation,
+                query_datum,
+                so.dist_fmgr,
+                so.collation,
+                ef_search,
+                None,
+                None,
+            )
+        };
+
+        so.results = results;
+        so.m = m;
+        so.query_datum = query_datum;
+        so.iterative_initialized = use_iterative;
         so.first = false;
     }
 
     // Return next result
     loop {
+        if so.results.is_empty() {
+            if iterative_scan == HnswIterativeScan::Off {
+                return false;
+            }
+
+            // Empty index (no discarded state initialized)
+            if !so.iterative_initialized {
+                return false;
+            }
+
+            let ef_search = crate::index::options::HNSW_EF_SEARCH.get() as usize;
+            let max_scan_tuples = HNSW_MAX_SCAN_TUPLES.get() as i64;
+
+            // Reached max number of tuples
+            if so.tuples >= max_scan_tuples {
+                if so.discarded.is_empty() {
+                    return false;
+                }
+
+                // Return remaining tuples one at a time from discarded
+                if let Some(NearestSC(sc)) = so.discarded.pop() {
+                    so.results.push(sc);
+                } else {
+                    return false;
+                }
+            } else {
+                // Resume scan with discarded candidates
+                so.results = resume_scan_items(
+                    (*scan).indexRelation,
+                    so.query_datum,
+                    so.dist_fmgr,
+                    so.collation,
+                    ef_search,
+                    so.m,
+                    &mut so.visited,
+                    &mut so.discarded,
+                );
+            }
+
+            if so.results.is_empty() {
+                return false;
+            }
+        }
+
         let sc = match so.results.pop() {
             Some(sc) => sc,
             None => return false,
@@ -563,6 +775,16 @@ pub unsafe extern "C-unwind" fn amgettuple(
         if sc.heaptids.is_empty() {
             continue;
         }
+
+        // Strict ordering: skip if distance is less than previous
+        if iterative_scan == HnswIterativeScan::StrictOrder {
+            if sc.distance < so.previous_distance {
+                continue;
+            }
+            so.previous_distance = sc.distance;
+        }
+
+        so.tuples += 1;
 
         // Return the first heap TID
         (*scan).xs_heaptid = sc.heaptids[0];
@@ -813,5 +1035,107 @@ mod tests {
         .expect("SPI failed")
         .expect("NULL");
         assert_eq!(count, 5);
+    }
+
+    #[pg_test]
+    fn test_hnsw_iterative_strict_order() {
+        Spi::run("CREATE TABLE test_iter1 (val vector(3))").unwrap();
+        Spi::run(
+            "INSERT INTO test_iter1 (val) VALUES \
+             ('[0,0,0]'), ('[1,2,3]'), ('[1,1,1]')",
+        )
+        .unwrap();
+        Spi::run("CREATE INDEX ON test_iter1 USING hnsw (val vector_l2_ops)").unwrap();
+
+        Spi::run("SET hnsw.iterative_scan = strict_order").unwrap();
+        Spi::run("SET hnsw.ef_search = 1").unwrap();
+
+        // Should still return all 3 results via iterative scanning
+        let count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM (\
+                SELECT val FROM test_iter1 \
+                ORDER BY val <-> '[3,3,3]'\
+             ) t",
+        )
+        .expect("SPI failed")
+        .expect("NULL");
+        assert_eq!(count, 3);
+
+        Spi::run("RESET hnsw.iterative_scan").unwrap();
+        Spi::run("RESET hnsw.ef_search").unwrap();
+    }
+
+    #[pg_test]
+    fn test_hnsw_iterative_relaxed_order() {
+        Spi::run("CREATE TABLE test_iter2 (val vector(3))").unwrap();
+        Spi::run(
+            "INSERT INTO test_iter2 (val) VALUES \
+             ('[0,0,0]'), ('[1,2,3]'), ('[1,1,1]')",
+        )
+        .unwrap();
+        Spi::run("CREATE INDEX ON test_iter2 USING hnsw (val vector_l2_ops)").unwrap();
+
+        Spi::run("SET hnsw.iterative_scan = relaxed_order").unwrap();
+
+        // Should return all 3 results
+        let count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM (\
+                SELECT val FROM test_iter2 \
+                ORDER BY val <-> '[3,3,3]'\
+             ) t",
+        )
+        .expect("SPI failed")
+        .expect("NULL");
+        assert_eq!(count, 3);
+
+        Spi::run("RESET hnsw.iterative_scan").unwrap();
+    }
+
+    #[pg_test]
+    fn test_hnsw_iterative_empty_table() {
+        Spi::run("CREATE TABLE test_iter3 (val vector(3))").unwrap();
+        Spi::run("CREATE INDEX ON test_iter3 USING hnsw (val vector_l2_ops)").unwrap();
+
+        Spi::run("SET hnsw.iterative_scan = strict_order").unwrap();
+
+        // Empty table should return 0 rows
+        let count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM (\
+                SELECT val FROM test_iter3 \
+                ORDER BY val <-> '[3,3,3]'\
+             ) t",
+        )
+        .expect("SPI failed")
+        .expect("NULL");
+        assert_eq!(count, 0);
+
+        Spi::run("RESET hnsw.iterative_scan").unwrap();
+    }
+
+    #[pg_test]
+    fn test_hnsw_iterative_after_truncate() {
+        Spi::run("CREATE TABLE test_iter4 (val vector(3))").unwrap();
+        Spi::run(
+            "INSERT INTO test_iter4 (val) VALUES \
+             ('[0,0,0]'), ('[1,2,3]'), ('[1,1,1]')",
+        )
+        .unwrap();
+        Spi::run("CREATE INDEX ON test_iter4 USING hnsw (val vector_l2_ops)").unwrap();
+
+        Spi::run("TRUNCATE test_iter4").unwrap();
+        Spi::run("SET hnsw.iterative_scan = strict_order").unwrap();
+
+        // Truncated table should return 0 rows
+        let count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM (\
+                SELECT val FROM test_iter4 \
+                ORDER BY val <-> '[3,3,3]'\
+             ) t",
+        )
+        .expect("SPI failed")
+        .expect("NULL");
+        assert_eq!(count, 0);
+
+        Spi::run("RESET hnsw.iterative_scan").unwrap();
     }
 }

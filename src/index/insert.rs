@@ -509,7 +509,19 @@ unsafe fn find_element_neighbors_on_disk(
 
     // Phase 1: greedy search from top layer down to new_level + 1
     for lc in (new_level + 1..=entry_level).rev() {
-        let w = search_layer_disk(index, ep_list, 1, lc, m, query_datum, dist_fmgr, collation);
+        let w = search_layer_disk(
+            index,
+            ep_list,
+            1,
+            lc,
+            m,
+            query_datum,
+            dist_fmgr,
+            collation,
+            None,
+            None,
+            true,
+        );
         ep_list = if w.is_empty() {
             return neighbors_by_layer;
         } else {
@@ -531,6 +543,9 @@ unsafe fn find_element_neighbors_on_disk(
             query_datum,
             dist_fmgr,
             collation,
+            None,
+            None,
+            true,
         );
 
         // Select up to lm nearest neighbors (simple selection)
