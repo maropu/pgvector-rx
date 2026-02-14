@@ -19,7 +19,6 @@ use crate::index::scan::{
     load_neighbor_tids, search_layer_disk, ScanCandidate,
 };
 use crate::types::hnsw::*;
-use crate::types::vector::VectorHeader;
 
 // ---------------------------------------------------------------------------
 // Page helpers
@@ -1236,18 +1235,9 @@ pub unsafe extern "C-unwind" fn aminsert(
         return false;
     }
 
-    // Detoast the vector datum
+    // Detoast the datum (type-agnostic: works for vector, bit, halfvec, etc.)
     let raw_datum = *values.add(0);
-    let mut vec_ptr = pg_sys::pg_detoast_datum(raw_datum.cast_mut_ptr()) as *const VectorHeader;
-    let dim = (*vec_ptr).dim as i32;
-
-    if !(1..=HNSW_MAX_DIM).contains(&dim) {
-        pgrx::error!(
-            "pgvector-rx: vector has {} dimensions, max is {}",
-            dim,
-            HNSW_MAX_DIM
-        );
-    }
+    let mut detoasted = pg_sys::pg_detoast_datum(raw_datum.cast_mut_ptr());
 
     // Check norm for cosine distance (skip zero-norm vectors)
     let norm_fmgr = if (*index_relation)
@@ -1263,14 +1253,18 @@ pub unsafe extern "C-unwind" fn aminsert(
     let collation = (*index_relation).rd_indcollation.read();
 
     if !norm_fmgr.is_null() {
-        let norm_result =
-            pg_sys::FunctionCall1Coll(norm_fmgr, collation, pg_sys::Datum::from(vec_ptr as usize));
+        let norm_result = pg_sys::FunctionCall1Coll(
+            norm_fmgr,
+            collation,
+            pg_sys::Datum::from(detoasted as usize),
+        );
         let norm_val = f64::from_bits(norm_result.value() as u64);
         if norm_val == 0.0 {
             return false;
         }
         // Normalize the vector to unit length for cosine distance.
-        vec_ptr = crate::types::vector::l2_normalize_raw(vec_ptr);
+        detoasted =
+            crate::types::vector::l2_normalize_raw(detoasted as *const _) as *mut pg_sys::varlena;
     }
 
     // Get index parameters
@@ -1281,7 +1275,7 @@ pub unsafe extern "C-unwind" fn aminsert(
 
     // Get distance function
     let dist_fmgr = pg_sys::index_getprocinfo(index_relation, 1, HNSW_DISTANCE_PROC);
-    let query_datum = pg_sys::Datum::from(vec_ptr as usize);
+    let query_datum = pg_sys::Datum::from(detoasted as usize);
 
     // Acquire shared UPDATE_LOCK
     let mut lockmode = pg_sys::ShareLock as pg_sys::LOCKMODE;
@@ -1330,7 +1324,7 @@ pub unsafe extern "C-unwind" fn aminsert(
     // Check for duplicate vectors among level-0 neighbors.
     // If found, add heap TID to the existing element instead of creating
     // a new graph node.
-    let varlena_ptr = vec_ptr as *const u8;
+    let varlena_ptr = detoasted as *const u8;
     let varlena_size = (*(varlena_ptr as *const u32) >> 2) as usize;
     if !neighbors_by_layer.is_empty()
         && find_duplicate_on_disk(

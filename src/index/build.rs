@@ -13,7 +13,6 @@ use crate::graph::{find_element_neighbors, update_neighbor_connections, Distance
 use crate::hnsw_constants::*;
 use crate::index::options::HnswOptions;
 use crate::types::hnsw::*;
-use crate::types::vector::VectorHeader;
 
 // ---------------------------------------------------------------------------
 // Buffer helpers (PostgreSQL macro equivalents)
@@ -282,30 +281,9 @@ unsafe extern "C-unwind" fn build_callback(
         return;
     }
 
-    // Detoast the vector datum
+    // Detoast the datum (type-agnostic: works for vector, bit, halfvec, etc.)
     let raw_datum = *values.add(0);
-    let mut vec_ptr = pg_sys::pg_detoast_datum(raw_datum.cast_mut_ptr()) as *const VectorHeader;
-    let dim = (*vec_ptr).dim as i32;
-
-    // Validate dimensions
-    if !(1..=HNSW_MAX_DIM).contains(&dim) {
-        pgrx::error!(
-            "pgvector-rx: vector has {} dimensions, max is {}",
-            dim,
-            HNSW_MAX_DIM
-        );
-    }
-
-    // Set dimensions from first non-null vector
-    if bs.dimensions == 0 {
-        bs.dimensions = dim;
-    } else if bs.dimensions != dim {
-        pgrx::error!(
-            "pgvector-rx: expected {} dimensions, not {}",
-            bs.dimensions,
-            dim
-        );
-    }
+    let mut detoasted = pg_sys::pg_detoast_datum(raw_datum.cast_mut_ptr());
 
     // Check norm for cosine distance (skip zero-norm vectors)
     // and normalize the vector when the norm function is present.
@@ -313,18 +291,25 @@ unsafe extern "C-unwind" fn build_callback(
         let norm_result = pg_sys::FunctionCall1Coll(
             bs.norm_fmgr,
             bs.collation,
-            pg_sys::Datum::from(vec_ptr as usize),
+            pg_sys::Datum::from(detoasted as usize),
         );
         let norm_val = f64::from_bits(norm_result.value() as u64);
         if norm_val == 0.0 {
             return;
         }
         // Normalize the vector to unit length for cosine distance.
-        vec_ptr = crate::types::vector::l2_normalize_raw(vec_ptr);
+        detoasted =
+            crate::types::vector::l2_normalize_raw(detoasted as *const _) as *mut pg_sys::varlena;
     }
 
-    // Copy the vector data into our values arena
-    let varlena_ptr = vec_ptr as *const u8;
+    // Copy the datum into our values arena.
+    // Pad the start to MAXALIGN (8-byte) boundary so varlena headers are aligned.
+    // This is necessary because varlena values (e.g., bit(8) = 9 bytes) may not
+    // be naturally aligned, and distance functions need aligned varlena headers.
+    let aligned_start = (bs.values.len() + 7) & !7;
+    bs.values.resize(aligned_start, 0);
+
+    let varlena_ptr = detoasted as *const u8;
     // VARSIZE: first 4 bytes store (size << 2) for 4-byte header
     let varlena_size = (*(varlena_ptr as *const u32) >> 2) as usize;
 
@@ -703,6 +688,22 @@ pub unsafe extern "C-unwind" fn ambuild(
     index_info: *mut pg_sys::IndexInfo,
 ) -> *mut pg_sys::IndexBuildResult {
     let mut bs = HnswBuildState::new(index_relation);
+
+    // Get dimensions from column typmod (type-agnostic: works for vector, bit, halfvec, etc.)
+    let att = pg_sys::TupleDescAttr((*index_relation).rd_att, 0);
+    let dimensions = (*att).atttypmod;
+
+    // Disallow varbit (variable-length bit) since HNSW requires fixed dimensions
+    if (*att).atttypid == pg_sys::VARBITOID {
+        pgrx::error!("type not supported for hnsw index");
+    }
+
+    // Require column to have dimensions
+    if dimensions < 0 {
+        pgrx::error!("column does not have dimensions");
+    }
+
+    bs.dimensions = dimensions;
 
     // Validate ef_construction >= 2 * m (matches original pgvector check)
     if bs.ef_construction < 2 * bs.m {
