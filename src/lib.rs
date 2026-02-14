@@ -14,6 +14,7 @@ pub mod utils;
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
     index::init_gucs();
+    index::init_relopts();
 }
 
 #[pg_extern]
