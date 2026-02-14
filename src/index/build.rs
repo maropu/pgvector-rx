@@ -115,6 +115,54 @@ unsafe fn hnsw_build_append_page(
 // Build state
 // ---------------------------------------------------------------------------
 
+/// Function pointer for type-specific normalization.
+pub type NormalizeFn = unsafe fn(*const pg_sys::varlena) -> *const pg_sys::varlena;
+
+/// Get the appropriate normalize function for the indexed type.
+///
+/// If FUNCTION 3 (TYPE_INFO_PROC) exists in the opclass, the indexed type
+/// has its own normalize function (e.g., halfvec). Otherwise, use the
+/// default vector normalize.
+///
+/// # Safety
+/// `index` must be a valid, open index relation.
+pub unsafe fn get_normalize_fn(index: pg_sys::Relation) -> NormalizeFn {
+    let has_support = (*index)
+        .rd_support
+        .add(HNSW_TYPE_INFO_PROC as usize - 1)
+        .read()
+        != pg_sys::InvalidOid;
+
+    if has_support {
+        // Call the support function to identify the type.
+        // Halfvec returns maxDimensions = 32000 (HNSW_MAX_DIM * 2).
+        let procinfo = pg_sys::index_getprocinfo(index, 1, HNSW_TYPE_INFO_PROC);
+        let result = pg_sys::FunctionCall0Coll(procinfo, pg_sys::InvalidOid);
+        let type_info = &*(result.value() as *const crate::types::halfvec::HnswTypeInfo);
+        if type_info.max_dimensions == 32000 {
+            // Halfvec type
+            |v| {
+                crate::types::halfvec::halfvec_l2_normalize_raw(
+                    v as *const crate::types::halfvec::HalfVecHeader,
+                ) as *const pg_sys::varlena
+            }
+        } else {
+            // Default: vector normalize (for future types, add dispatch here)
+            |v| {
+                crate::types::vector::l2_normalize_raw(
+                    v as *const crate::types::vector::VectorHeader,
+                ) as *const pg_sys::varlena
+            }
+        }
+    } else {
+        // Default: vector type
+        |v| {
+            crate::types::vector::l2_normalize_raw(v as *const crate::types::vector::VectorHeader)
+                as *const pg_sys::varlena
+        }
+    }
+}
+
 /// State for in-memory HNSW index construction.
 struct HnswBuildState {
     /// Graph elements arena.
@@ -142,6 +190,8 @@ struct HnswBuildState {
     collation: pg_sys::Oid,
     /// Pointer to the norm function's FmgrInfo, or null.
     norm_fmgr: *mut pg_sys::FmgrInfo,
+    /// Type-specific normalize function.
+    normalize_fn: NormalizeFn,
     /// Number of indexed tuples.
     ind_tuples: f64,
     /// Heap relation tuples (from scan).
@@ -190,6 +240,9 @@ impl HnswBuildState {
                 std::ptr::null_mut()
             };
 
+        // Get the type-specific normalize function.
+        let normalize_fn = get_normalize_fn(index);
+
         Self {
             elements: Vec::new(),
             values: Vec::new(),
@@ -203,6 +256,7 @@ impl HnswBuildState {
             dist_fmgr,
             collation,
             norm_fmgr,
+            normalize_fn,
             ind_tuples: 0.0,
             rel_tuples: 0.0,
             index,
@@ -298,8 +352,7 @@ unsafe extern "C-unwind" fn build_callback(
             return;
         }
         // Normalize the vector to unit length for cosine distance.
-        detoasted =
-            crate::types::vector::l2_normalize_raw(detoasted as *const _) as *mut pg_sys::varlena;
+        detoasted = (bs.normalize_fn)(detoasted as *const _) as *mut pg_sys::varlena;
     }
 
     // Copy the datum into our values arena.
@@ -340,6 +393,10 @@ unsafe extern "C-unwind" fn build_callback(
         // If an identical vector is found with room for another heap TID,
         // add this heap TID to the existing element instead of creating
         // a new graph node.
+        //
+        // We compare raw datum bytes (like C's datumIsEqual) rather than
+        // checking distance == 0, because some distance metrics (e.g.
+        // negative_inner_product) return 0 for non-identical vectors.
         let mut is_duplicate = false;
         let neighbors_layer0 = &bs.elements[new_idx].neighbors[0];
         for neighbor in &neighbors_layer0.items {
@@ -348,7 +405,15 @@ unsafe extern "C-unwind" fn build_callback(
                 break;
             }
             let dup_idx = neighbor.idx;
-            if bs.heap_tids[dup_idx].len() < HNSW_HEAPTIDS {
+            // Compare actual values byte-by-byte
+            let new_off = bs.elements[new_idx].value_offset;
+            let new_sz = bs.elements[new_idx].value_size;
+            let dup_off = bs.elements[dup_idx].value_offset;
+            let dup_sz = bs.elements[dup_idx].value_size;
+            if new_sz == dup_sz
+                && bs.values[new_off..new_off + new_sz] == bs.values[dup_off..dup_off + dup_sz]
+                && bs.heap_tids[dup_idx].len() < HNSW_HEAPTIDS
+            {
                 bs.heap_tids[dup_idx].push(*tid);
                 is_duplicate = true;
                 break;

@@ -1263,8 +1263,8 @@ pub unsafe extern "C-unwind" fn aminsert(
             return false;
         }
         // Normalize the vector to unit length for cosine distance.
-        detoasted =
-            crate::types::vector::l2_normalize_raw(detoasted as *const _) as *mut pg_sys::varlena;
+        let normalize_fn = crate::index::build::get_normalize_fn(index_relation);
+        detoasted = normalize_fn(detoasted as *const _) as *mut pg_sys::varlena;
     }
 
     // Get index parameters

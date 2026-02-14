@@ -573,6 +573,8 @@ struct HnswScanState {
     dist_fmgr: *mut pg_sys::FmgrInfo,
     /// Norm function FmgrInfo pointer (for cosine normalization), or null.
     norm_fmgr: *mut pg_sys::FmgrInfo,
+    /// Type-specific normalize function.
+    normalize_fn: crate::index::build::NormalizeFn,
     /// Collation for the distance function.
     collation: pg_sys::Oid,
     /// Result list sorted by distance (nearest last for pop).
@@ -626,10 +628,14 @@ pub unsafe extern "C-unwind" fn ambeginscan(
         std::ptr::null_mut()
     };
 
+    // Get the type-specific normalize function.
+    let normalize_fn = crate::index::build::get_normalize_fn(index_relation);
+
     let state = Box::new(HnswScanState {
         first: true,
         dist_fmgr,
         norm_fmgr,
+        normalize_fn,
         collation,
         results: Vec::new(),
         m: 0,
@@ -726,7 +732,7 @@ pub unsafe extern "C-unwind" fn amgettuple(
             let value = order_by.sk_argument;
             // Normalize the query vector for cosine distance
             if !so.norm_fmgr.is_null() && value.value() != 0 {
-                let normalized = crate::types::vector::l2_normalize_raw(value.cast_mut_ptr());
+                let normalized = (so.normalize_fn)(value.cast_mut_ptr() as *const pg_sys::varlena);
                 pg_sys::Datum::from(normalized as usize)
             } else {
                 value
