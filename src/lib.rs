@@ -1,6 +1,20 @@
+//! pgvector-rx: HNSW vector index for PostgreSQL, implemented in Rust.
+
 use pgrx::prelude::*;
 
+pub mod graph;
+pub mod hnsw_constants;
+pub mod index;
+pub mod types;
+pub mod utils;
+
 ::pgrx::pg_module_magic!(name, version);
+
+/// Extension initialization — registers GUCs and hooks.
+#[pg_guard]
+pub extern "C-unwind" fn _PG_init() {
+    index::init_gucs();
+}
 
 #[pg_extern]
 fn hello_pgvector_rx() -> &'static str {
@@ -16,7 +30,6 @@ mod tests {
     fn test_hello_pgvector_rx() {
         assert_eq!("Hello, pgvector_rx", crate::hello_pgvector_rx());
     }
-
 }
 
 /// This module is required by `cargo pgrx test` invocations.
