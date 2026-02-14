@@ -69,24 +69,9 @@ jobs:
       run: |
         cargo build --release --features pg18 --no-default-features
     
-    - name: Run tests
+    - name: Run tests and verify extension loading
       run: |
+        # This command builds the extension, installs it,
+        # starts PostgreSQL, runs tests including extension loading,
+        # and stops PostgreSQL automatically
         cargo pgrx test pg18
-    
-    - name: Start PostgreSQL and test extension loading
-      run: |
-        # Start PostgreSQL in background
-        cargo pgrx start pg18
-        
-        # Wait for PostgreSQL to be ready
-        sleep 5
-        
-        # Install extension
-        cargo pgrx install --pg-config ~/.pgrx/18.2/pgrx-install/bin/pg_config
-        
-        # Test extension loading
-        ~/.pgrx/18.2/pgrx-install/bin/psql -p 28818 -d postgres -c "CREATE EXTENSION pgvector_rx;"
-        ~/.pgrx/18.2/pgrx-install/bin/psql -p 28818 -d postgres -c "SELECT hello_pgvector_rx();"
-        
-        # Stop PostgreSQL
-        cargo pgrx stop pg18
