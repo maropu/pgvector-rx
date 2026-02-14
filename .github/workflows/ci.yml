@@ -51,7 +51,9 @@ jobs:
     
     - name: Install cargo-pgrx
       run: |
-        cargo install cargo-pgrx --locked --version 0.17.0
+        if ! cargo pgrx --version 2>/dev/null | grep -q "0.17.0"; then
+          cargo install cargo-pgrx --locked --version 0.17.0 --force
+        fi
     
     - name: Cache pgrx PostgreSQL installation
       uses: actions/cache@v4
