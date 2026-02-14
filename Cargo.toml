@@ -23,6 +23,7 @@ pg_test = []
 [dependencies]
 pgrx = "=0.17.0"
 paste = "1"
+rand = "0.8"
 ryu = "1"
 
 [dev-dependencies]
