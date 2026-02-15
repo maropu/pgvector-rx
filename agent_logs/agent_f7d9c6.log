@@ -1,0 +1,734 @@
+
+
+I'll start by orienting myself - checking the repository state, open issues, and current build status.
+
+● Check git status and recent history
+  $ cd /Users/maropu/Repositories/pgvector-rx && git status && echo "---" && git log --oneline -10
+  └ 16 lines...
+
+● List open GitHub issues
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh issue list --state open --limit 30 2>&1
+  └ 11 lines...
+
+● Check recent CI runs
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh run list --limit 5 2>&1
+  └ 7 lines...
+
+Good - CI is green. Phases 1-6 are implemented. Let me check the status of each issue and Phase 7 (Testing and Optimization) in detail.
+
+● View Phase 7 issue details
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh issue view 8 2>&1 | head -60
+  └ 61 lines...
+
+● View all phase issues
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh issue view 1 2>&1 | head -30 && echo "===" && gh
+   issue view 2 2>&1 | head -30 && echo "===" && gh issue view 3 2>&1 | head -30 && echo "===" && gh
+   issue view 4 2>&1 | head -30 && echo "===" && gh issue view 5 2>&1 | head -30 && echo "===" && gh
+   issue view 6 2>&1 | head -30
+  └ 186 lines...
+
+Now let me understand the current state better - check what tests exist and what passes.
+
+● Check existing test files
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls -la tests/ sql/ 2>&1
+  └ 11 lines...
+
+● Check reference SQL tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls -la references/pgvector/test/sql/hnsw_*.sql 2>&1
+   | head -20
+  └ 5 lines...
+
+● Check reference Perl tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls -la references/pgvector/test/t/ 2>&1 | head -30
+  └ 31 lines...
+
+● Check existing regression tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls tests/pg_regress/
+  └ 2 lines...
+
+● List all HNSW Perl tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls references/pgvector/test/t/ | grep hnsw
+  └ 25 lines...
+
+● Read the main HNSW vector SQL test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat references/pgvector/test/sql/hnsw_vector.sql
+  └ 118 lines...
+
+Let me check the current test infrastructure and what the expected output looks like.
+
+● Check existing pg_regress tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls tests/pg_regress/sql/ tests/pg_regress/expected/
+   2>&1
+  └ 6 lines...
+
+● Read expected output for hnsw_vector test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat
+  references/pgvector/test/expected/hnsw_vector.out
+  └ 202 lines...
+
+Now let me check the existing test setup and run the current tests to see the baseline.
+
+● Check setup SQL
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat tests/pg_regress/sql/setup.sql
+  └ 4 lines...
+
+● Check setup expected output
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat tests/pg_regress/expected/setup.out
+  └ 4 lines...
+
+● Check how pg_regress tests are configured
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -r "pg_regress" Cargo.toml src/ 2>&1 | head
+  -20
+  └ 1 line...
+
+Let me run the existing pgrx tests to see the baseline, and also look at the current source code to understand what's implemented.
+
+● List directory src
+  └ 7 files found
+
+● Run existing tests to see baseline
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | tail -40
+  └ 40 lines...
+
+All 84 tests pass. Now I need to decide what to work on. Phase 7 is Testing and Optimization. The most impactful next step is to port the SQL regression tests from pgvector. Let me start with the `hnsw_vector.sql` test since it's the most fundamental one.
+
+Let me first check what features we currently support to understand what parts of the test will work.
+
+● Explore: Explore current implementations
+  ● Glob "**/*.sql" in /Users/maropu/Repositories/pgvector-rx
+    └ 1 file found
+  ● Grep "DEFAULT|MIN|MAX" (/Users/maropu/Repositories/pgvector-rx/src/hnsw_constants.rs)
+    └ 17 lines found
+
+Good - the core implementation looks complete. Let me now create the `hnsw_vector.sql` regression test. Let me first check what error messages our implementation produces to make sure they match.
+
+● Read hnsw_vector.sql test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat references/pgvector/test/sql/hnsw_vector.sql
+  └ 118 lines...
+
+● Read expected output for hnsw_vector test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat
+  references/pgvector/test/expected/hnsw_vector.out
+  └ 202 lines...
+
+Now I need to verify this test actually runs against our implementation. Let me try running it manually with `cargo pgrx run` to check if the output matches. But first, let me understand how pgrx regression tests work.
+
+● Check how regression tests are configured
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -r "pg_regress\|regress\|test.*sql" Cargo.toml
+   2>&1
+  └ 1 line...
+
+● Check test module in lib.rs
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn "pgrx_tests" src/lib.rs 2>&1
+  └ 1 line...
+
+● Read src/lib.rs
+  └ 49 lines read
+
+The pgrx framework has its own test infrastructure. The `tests/pg_regress/` directory is for pgrx's built-in pg_regress support. Let me try running the test directly by creating the SQL file and expected output, then see if pgrx can run it.
+
+Actually, the best approach for this iteration is to run the hnsw_vector.sql test manually against our extension to validate it works. Let me try that with `cargo pgrx run`.
+
+Instead, let me take a more practical approach: create the regression test files and then manually verify them. Let me first start a pgrx PostgreSQL instance and run the SQL to see what output we get.
+
+● Start PG18 instance
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx start pg18 2>&1 | tail -5
+  └ 1 line...
+
+● Install extension
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx install pg18 2>&1 | tail -5
+  └ 6 lines...
+
+● Install extension with pg_config
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx install --pg-config
+  ~/.pgrx/18.4/pgrx-install/bin/pg_config 2>&1 | tail -10
+  └ 11 lines...
+
+● Check pgrx directory
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls ~/.pgrx/
+  └ 2 lines...
+
+● Install extension with correct pg_config
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx install --pg-config
+  ~/.pgrx/18.2/pgrx-install/bin/pg_config 2>&1 | tail -10
+  └ 11 lines...
+
+Now let me run the hnsw_vector test SQL against our extension.
+
+● Create test database
+  $ cd /Users/maropu/Repositories/pgvector-rx && ~/.pgrx/18.2/pgrx-install/bin/psql -h localhost -p
+  28818 -d postgres -c "DROP DATABASE IF EXISTS test_hnsw; CREATE DATABASE test_hnsw;" 2>&1
+  └ 2 lines...
+
+● Create test database
+  $ cd /Users/maropu/Repositories/pgvector-rx && ~/.pgrx/18.2/pgrx-install/bin/psql -h localhost -p
+  28818 -d postgres -c "DROP DATABASE IF EXISTS test_hnsw;" && ~/.pgrx/18.2/pgrx-install/bin/psql -h
+   localhost -p 28818 -d postgres -c "CREATE DATABASE test_hnsw;" 2>&1
+  └ 4 lines...
+
+● Create extension in test db
+  $ cd /Users/maropu/Repositories/pgvector-rx && ~/.pgrx/18.2/pgrx-install/bin/psql -h localhost -p
+  28818 -d test_hnsw -c "CREATE EXTENSION pgvector_rx;" 2>&1
+  └ 2 lines...
+
+Now let me run the full hnsw_vector.sql test and capture output:
+
+● Run hnsw_vector.sql test
+  $ cd /Users/maropu/Repositories/pgvector-rx && ~/.pgrx/18.2/pgrx-install/bin/psql -h localhost -p
+  28818 -d test_hnsw -e -f references/pgvector/test/sql/hnsw_vector.sql 2>&1
+  └ 229 lines...
+
+I found two issues:
+
+1. **`SELECT COUNT(*) FROM t;`** — This fails with `ERROR: cannot scan hnsw index without order`. The expected output shows `5` rows. This means `SELECT COUNT(*)` without ORDER BY should work (it should use seq scan or a different path, not the HNSW index).
+
+2. **Cosine distance ordering** — Our output shows `[1,2,4], [1,2,3], [1,1,1]` but expected is `[1,1,1], [1,2,3], [1,2,4]`.
+
+Let me investigate both issues.
+
+● Explore: Explore cosine distance issue
+  ● Grep "FunctionCallInfoData|distance|DatumGetFloat8"
+  (/Users/maropu/Repositories/pgvector-rx/src/index/build.rs)
+    └ 11 lines found
+  ● Read src/index/build.rs lines 220-300
+    └ 81 lines read
+
+● Explore: Explore scan error handling
+  ● Read src/index/scan.rs lines 500-600
+    └ 101 lines read
+  ● Read src/index/scan.rs lines 600-700
+    └ 101 lines read
+
+Excellent! I found two issues:
+
+1. **COUNT(*) without ORDER BY**: Both pgvector and our implementation error. The expected test output shows it returns 5, which means the test expects `enable_seqscan = off` to not force an index-only scan for `COUNT(*)`. The issue is that PostgreSQL should fall back to a sequential scan when there's no ORDER BY. Let me check if this is a planner issue in our setup.
+
+2. **Cosine distance ordering**: The operator class `vector_cosine_ops` uses `vector_negative_inner_product` as FUNCTION 1 instead of `cosine_distance`. This causes reversed ordering in HNSW scans.
+
+Let me investigate both more carefully:
+
+● Check query plan for COUNT(*)
+  $ cd /Users/maropu/Repositories/pgvector-rx && ~/.pgrx/18.2/pgrx-install/bin/psql -h localhost -p
+  28818 -d test_hnsw -c "SET enable_seqscan = off; CREATE TABLE t2 (val vector(3)); INSERT INTO t2
+  (val) VALUES ('[0,0,0]'), ('[1,2,3]'), ('[1,1,1]'), (NULL); CREATE INDEX ON t2 USING hnsw (val
+  vector_l2_ops); INSERT INTO t2 (val) VALUES ('[1,2,4]'); EXPLAIN SELECT COUNT(*) FROM t2;" 2>&1
+  └ 11 lines...
+
+The planner is choosing an Index Only Scan on the HNSW index for `COUNT(*)`, which causes the error because HNSW requires ORDER BY. The issue is that our AM handler likely claims it supports index-only scans. Let me check:
+
+● Grep "vector_cosine_ops|cosine_distance|negative_inner_product"
+(/Users/maropu/Repositories/pgvector-rx/src/types/vector.rs)
+  └ 17 lines found
+
+● Grep "amcanreturn|amoptionalkey|amcaninclude"
+(/Users/maropu/Repositories/pgvector-rx/src/index/handler.rs)
+  └ 3 lines found
+
+Let me see the full handler.rs to understand the amcanreturn setting and how pgvector C handles it:
+
+● Read src/index/handler.rs lines 70-115
+  └ 46 lines read
+
+● Check pgvector C amcanreturn setting
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "amcanreturn\|amoptionalkey"
+  references/pgvector/src/hnsw.c 2>&1
+  └ 3 lines...
+
+Both our implementation and pgvector C set `amcanreturn = None/NULL`. Yet in pgvector, `SELECT COUNT(*) FROM t;` (with `enable_seqscan = off`) returns 5 rows successfully. 
+
+Let me check if the original pgvector also errors on this. Let me re-read the expected output more carefully:
+
+Looking back at the expected output:
+```
+SELECT COUNT(*) FROM t;
+ count 
+-------
+     5
+(1 row)
+```
+
+In pgvector, this works because `enable_seqscan = off` doesn't completely prevent sequential scans - it just discourages them. The planner should still pick seq scan if no index scan is possible. The difference is that our cost estimate might be lower than pgvector's, causing the planner to prefer the HNSW index even though it can't serve this query.
+
+Let me check our cost estimate:
+
+● Grep "amcostestimate|cost_estimate" (/Users/maropu/Repositories/pgvector-rx/src/index/handler.rs)
+  └ 2 lines found
+
+● Grep "amcostestimate" (/Users/maropu/Repositories/pgvector-rx/src/index)
+  └ 2 lines found
+
+● Read src/index/handler.rs lines 17-55
+  └ 39 lines read
+
+There's the problem! Our cost estimate returns `0.0` for all costs, which makes the planner always prefer our index, even for queries without ORDER BY. The pgvector C implementation has a proper cost estimate. Let me check:
+
+● Check pgvector cost estimate
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -A 30 "hnswcostestimate"
+  references/pgvector/src/hnsw.c 2>&1
+  └ 64 lines...
+
+The key insight is pgvector's cost estimate: **"Never use index without order"** — when `path->indexorderbys == NIL`, it sets costs to infinity and `disabled_nodes = 2` on PG18. This prevents the planner from choosing the HNSW index for queries without ORDER BY.
+
+Now I have two clear fixes:
+
+1. **Fix cost estimate**: Return infinity cost when no orderbys, matching pgvector behavior
+2. **Fix cosine opclass**: Change FUNCTION 1 from `vector_negative_inner_product` to `cosine_distance`
+
+Let me also check the reference pgvector for the cosine opclass:
+
+● Check pgvector cosine opclass
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -A 10 "vector_cosine_ops"
+  references/pgvector/src/hnsw.c 2>&1
+  └ 1 line...
+
+● Check pgvector SQL for cosine opclass
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn
+  "cosine_ops\|CosineDistance\|cosine_distance" references/pgvector/sql/ 2>&1 | head -20
+  └ 21 lines...
+
+● Check pgvector cosine opclass definition
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -A 10 "CREATE OPERATOR CLASS
+  vector_cosine_ops" references/pgvector/sql/vector.sql
+  └ 23 lines...
+
+Interesting! Pgvector **also** uses `vector_negative_inner_product` as FUNCTION 1 for `vector_cosine_ops` in HNSW. So the opclass definition is correct — the issue must be elsewhere. Let me investigate how pgvector uses these functions in the HNSW code:
+
+● Check how pgvector uses opclass functions
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "procnum\|HNSW_DISTANCE_PROC\|HNSW_NORM_PROC\|GetProcSupport\|fmgr\|distance\|norm"
+  references/pgvector/src/hnswutils.c 2>&1 | head -40
+  └ 41 lines...
+
+● Check distance function dispatch in pgvector
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "HNSW_DISTANCE_PROC\|HNSW_NORM_PROC\|HnswGetDistance\|normprocinfo"
+  references/pgvector/src/hnswutils.c 2>&1 | head -20
+  └ 9 lines...
+
+● See HnswGetDistance implementation
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '510,530p'
+  references/pgvector/src/hnswutils.c
+  └ 21 lines...
+
+So pgvector uses FUNCTION 1 (`vector_negative_inner_product`) directly as the distance function. But then with negative inner product, the graph would be built with negative values as distances, and the search returns results in ascending order. For cosine similarity, `neg_inner_product = -dot(a,b)` — but this isn't the same as cosine distance!
+
+Wait, let me look more carefully at what happens after the distance is computed. The key is in how the scan returns results:
+
+● Check norm handling for cosine
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "normprocinfo\|CheckNorm\|HnswCheckNorm"
+  references/pgvector/src/hnswutils.c | head -20
+  └ 6 lines...
+
+● Check norm handling in pgvector
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '400,420p'
+  references/pgvector/src/hnswutils.c
+  └ 21 lines...
+
+Now I understand! When a norm function is present in the opclass (FUNCTION 2), pgvector **normalizes** the vectors before computing the distance. For cosine distance:
+- Vectors are normalized to unit vectors
+- Then negative inner product is computed: `-dot(normalized_a, normalized_b)`
+- Since both are unit vectors, `-dot(a/|a|, b/|b|)` = `-(cos θ)` = cosine distance - 1
+
+Wait, that's not quite right. Let me check if our implementation normalizes:
+
+● Grep "norm|normalize|NORM_PROC" (/Users/maropu/Repositories/pgvector-rx/src/index)
+  └ 23 lines found
+
+● Check pgvector normalization
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "normalize\|NormValue\|HnswNormValue"
+  references/pgvector/src/hnswutils.c | head -10
+  └ 11 lines...
+
+● See HnswNormValue
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '155,165p'
+  references/pgvector/src/hnswutils.c
+  └ 12 lines...
+
+So pgvector **normalizes the vectors** (L2 normalization) before storing them in the index when the norm function (FUNCTION 2) is present. Then it uses `negative_inner_product` on normalized vectors, which effectively gives the cosine distance ordering.
+
+Now let me check if our build and insert code normalize the vectors:
+
+● Read src/index/build.rs lines 300-345
+  └ 46 lines read
+
+I see! Our build code checks for zero-norm vectors (and skips them), but it does **NOT normalize** the vectors before storing them. Let me also check the scan side:
+
+● Grep "norm|normalize" (/Users/maropu/Repositories/pgvector-rx/src/index/scan.rs)
+  └ No matches found
+
+● Grep "distance_fn|dist_fn|DISTANCE_PROC|procinfo"
+(/Users/maropu/Repositories/pgvector-rx/src/index/scan.rs)
+  └ 1 line found
+
+● Read src/index/scan.rs lines 590-660
+  └ 71 lines read
+
+I see the problem clearly now. Our scan gets the distance function but doesn't handle normalization. The scan needs to:
+1. Normalize the query vector when a norm function is present
+2. Store it for distance comparisons
+
+And our build needs to normalize vectors before storing them.
+
+Let me look at how pgvector handles the scan side:
+
+● Check scan normalization in pgvector
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "normprocinfo\|normalize\|NormValue\|formIndexValue\|FormIndex" references/pgvector/src/hnswscan.c
+   2>&1 | head -20
+  └ 3 lines...
+
+● See scan rescan context
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '85,110p' references/pgvector/src/hnswscan.c
+  └ 27 lines...
+
+OK, so in the scan, pgvector normalizes the query vector. And in the build, it normalizes each tuple's vector. Our implementation needs to do the same.
+
+Now let me also check how pgvector normalizes in the insert path:
+
+● Check insert normalization in pgvector
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "normalize\|NormValue\|FormIndex\|formIndex\|normprocinfo" references/pgvector/src/hnswinsert.c
+  2>&1 | head -20
+  └ 2 lines...
+
+So in insert, pgvector calls `HnswFormIndexValue` which handles normalization. Let me check our insert path:
+
+● Read src/index/insert.rs lines 605-650
+  └ 46 lines read
+
+I see — our insert checks norm but doesn't normalize the vector either. Now I need to understand what "normalize" means here. Let me check the `l2_normalize` function in pgvector:
+
+● Check l2_normalize implementation
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -A 20 "^Datum\|^l2_normalize"
+  references/pgvector/src/vector.c | grep -A 20 "l2_normalize" | head -30
+  └ 24 lines...
+
+OK so pgvector normalizes vectors to unit length. We need to:
+
+1. **Normalize vectors during build** before storing them
+2. **Normalize vectors during insert** before storing them
+3. **Normalize the query vector during scan** before computing distances
+
+This is a significant issue. But let me first plan my approach. The two bugs to fix this iteration are:
+
+1. **Cost estimate bug**: Return infinity when no ORDER BY (prevents incorrect index-only scan for COUNT(*))
+2. **Cosine normalization bug**: Normalize vectors in build, insert, and scan paths
+
+Let me create a plan:
+
+● Create ~/.copilot/session-state/b93d319a-bd70-46aa-b99b-2b26a4cf376d/plan.md (+33)
+
+Now let me check if we already have an `l2_normalize` function registered:
+
+● Grep "l2_normalize|normalize" (/Users/maropu/Repositories/pgvector-rx/src/types/vector.rs)
+  └ No matches found
+
+We don't have `l2_normalize`. But actually, looking at this more carefully, for normalization during build/insert/scan, we don't necessarily need the SQL function — we can call the pgvector pattern where we directly normalize the vector in Rust. But the opclass uses `vector_norm(vector)` as FUNCTION 2, and the normalization step happens in the C code's `HnswFormIndexValue` and `hnswrescan`.
+
+Let me look at what function pgvector uses. It uses `typeInfo->normalize` which is `l2_normalize`. For our extension, we need a similar normalize function. But since our opclass already registers `vector_norm` as FUNCTION 2, and we check the norm value, we just need to additionally normalize the vector.
+
+The simplest approach: implement the normalization inline in Rust, or register an `l2_normalize` function and call it via FunctionCall.
+
+Let me go with the simpler Rust-native approach: normalize the vector data directly in Rust after the norm check passes.
+
+Let me start implementing:
+
+● Read src/index/handler.rs lines 1-40
+  └ 40 lines read
+
+Now let me fix the cost estimate. I need to check if `indexorderbys` is NIL:
+
+● Check IndexPath field name
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn
+  "indexorderbys\|indexOrderBys\|index_orderbys" target/debug/build/pgrx-pg-sys-*/out/pg18.rs 2>&1 |
+   head -10
+  └ 9 lines...
+
+● Check disabled_nodes and infinity
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "disabled_nodes\|get_float8_infinity"
+  target/debug/build/pgrx-pg-sys-09599dc749172009/out/pg18.rs 2>&1 | head -10
+  └ 11 lines...
+
+Good. Now let me implement the fix:
+
+● Edit src/index/handler.rs (+19 -5)
+
+Now let me fix the cosine normalization. I need to normalize vectors in three places: build, insert, and scan. Let me first look at how our vector struct is laid out:
+
+● Grep "struct|varlena|dim|HEADER|header"
+(/Users/maropu/Repositories/pgvector-rx/src/types/vector.rs)
+  └ 99 lines found
+
+Now let me look at the vector_norm function and plan the l2_normalize function:
+
+● Read src/types/vector.rs lines 530-560
+  └ 31 lines read
+
+Now I need to add an `l2_normalize` function. Let me look at what functions are currently registered:
+
+● Read src/types/vector.rs lines 430-445
+  └ 16 lines read
+
+● Read src/types/vector.rs lines 86-120
+  └ 35 lines read
+
+Now I need to add an `l2_normalize` function. Let me add it:
+
+● Read src/types/vector.rs lines 530-550
+  └ 21 lines read
+
+● Edit src/types/vector.rs (+1)
+
+Now add the `l2_normalize` function after `vector_norm`:
+
+● Edit src/types/vector.rs (+26)
+
+Now I need to register the `l2_normalize` SQL function. Let me find where the SQL functions are registered:
+
+● Read src/types/vector.rs lines 610-630
+  └ 21 lines read
+
+● Read src/types/vector.rs lines 630-660
+  └ 31 lines read
+
+I need to add `l2_normalize` function registration:
+
+● Edit src/types/vector.rs (+3)
+
+Now I need to add normalization to the build, insert, and scan paths. Let me start with the build path:
+
+● Read src/index/build.rs lines 135-210
+  └ 76 lines read
+
+● Read src/index/build.rs lines 290-350
+  └ 61 lines read
+
+I need to normalize the vector before storing it in the values arena. Let me modify the build callback:
+
+● Edit src/index/build.rs (+3)
+
+I need to make `vec_ptr` mutable. Let me check the function signature:
+
+● Read src/index/build.rs lines 262-290
+  └ 29 lines read
+
+I need to make `vec_ptr` mutable so it can be reassigned after normalization:
+
+● Edit src/index/build.rs (+1 -1)
+
+Now I need to add the `l2_normalize_raw` helper function in vector.rs. This function normalizes a vector in-place or returns a new normalized vector:
+
+● Read src/types/vector.rs lines 86-100
+  └ 15 lines read
+
+● Edit src/types/vector.rs (+26)
+
+Now let me fix the insert path. Let me look at the current insert code:
+
+● Read src/index/insert.rs lines 570-650
+  └ 81 lines read
+
+I need to add normalization after the norm check in insert:
+
+● Edit src/index/insert.rs (+2 -1)
+
+● Edit src/index/insert.rs (+2)
+
+Now I need to fix the scan path to normalize the query vector. Let me look at the scan:
+
+● Read src/index/scan.rs lines 590-660
+  └ 71 lines read
+
+I need to see how the scan extracts the query datum in amgettuple. Let me look at where `query_datum` is set:
+
+● Grep "query_datum" (/Users/maropu/Repositories/pgvector-rx/src/index/scan.rs)
+  └ 20 lines found
+
+● Read src/index/scan.rs lines 670-725
+  └ 56 lines read
+
+I need to normalize `query_datum` before using it. I need to get the norm function info from the index relation. Let me modify `ambeginscan` to store the norm function info, and `amgettuple` to normalize the query:
+
+● Read src/index/scan.rs lines 1-30
+  └ 30 lines read
+
+Let me look at the HnswScanState struct:
+
+● Grep "struct HnswScanState" (/Users/maropu/Repositories/pgvector-rx/src/index/scan.rs)
+  └ 1 line found
+
+● Read src/index/scan.rs lines 559-590
+  └ 32 lines read
+
+I need to add a `norm_fmgr` field to the scan state and normalize the query in amgettuple:
+
+● Edit src/index/scan.rs (+2)
+
+Now update `ambeginscan` to get the norm function:
+
+● Edit src/index/scan.rs (+13)
+
+Now I need to normalize the query datum in `amgettuple` before the search. Let me update the part where `query_datum` is extracted:
+
+● Read src/index/scan.rs lines 680-720
+  └ 41 lines read
+
+● Edit src/index/scan.rs (+9 -1)
+
+Now I also need to check the vacuum path — does it need normalization too? Let me check:
+
+● Grep "norm|distance|dist_fmgr" (/Users/maropu/Repositories/pgvector-rx/src/index/vacuum.rs)
+  └ 14 lines found
+
+The vacuum path uses distance functions to compare existing indexed vectors, which are already normalized (since they were normalized during build/insert). So vacuum should work correctly without changes — the vectors stored in the index are already normalized.
+
+Now let me build and test:
+
+● Check compilation
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --no-default-features --features pg18
+  2>&1 | tail -20
+  └ 3 lines...
+
+Compiles cleanly. Now let me run the tests:
+
+● Run all tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | tail -40
+  └ 40 lines...
+
+All 84 tests pass. Now let me install and re-run the hnsw_vector.sql test to verify the fixes:
+
+● Install extension
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx install --pg-config
+  ~/.pgrx/18.2/pgrx-install/bin/pg_config 2>&1 | tail -5
+  └ 6 lines...
+
+● Create fresh test database
+  $ cd /Users/maropu/Repositories/pgvector-rx && ~/.pgrx/18.2/pgrx-install/bin/psql -h localhost -p
+  28818 -d postgres -c "DROP DATABASE IF EXISTS test_hnsw2;" && ~/.pgrx/18.2/pgrx-install/bin/psql
+  -h localhost -p 28818 -d postgres -c "CREATE DATABASE test_hnsw2;" &&
+  ~/.pgrx/18.2/pgrx-install/bin/psql -h localhost -p 28818 -d test_hnsw2 -c "CREATE EXTENSION
+  pgvector_rx;" 2>&1
+  └ 5 lines...
+
+● Run hnsw_vector.sql test
+  $ cd /Users/maropu/Repositories/pgvector-rx && ~/.pgrx/18.2/pgrx-install/bin/psql -h localhost -p
+  28818 -d test_hnsw2 -e -f references/pgvector/test/sql/hnsw_vector.sql 2>&1
+  └ 233 lines...
+
+All output matches the expected output exactly! Both fixes work:
+1. ✅ `SELECT COUNT(*) FROM t;` now returns 5 (uses seq scan instead of broken HNSW index-only scan)
+2. ✅ Cosine distance ordering is correct: `[1,1,1], [1,2,3], [1,2,4]`
+
+Now let me add the regression test files to the project. First, let me copy the SQL and create the expected output:
+
+● Copy SQL test file
+  $ cp /Users/maropu/Repositories/pgvector-rx/references/pgvector/test/sql/hnsw_vector.sql
+  /Users/maropu/Repositories/pgvector-rx/tests/pg_regress/sql/hnsw_vector.sql
+  └ 1 line...
+
+● Copy expected output file
+  $ cp /Users/maropu/Repositories/pgvector-rx/references/pgvector/test/expected/hnsw_vector.out
+  /Users/maropu/Repositories/pgvector-rx/tests/pg_regress/expected/hnsw_vector.out
+  └ 1 line...
+
+Now let me run the formatting and clippy checks:
+
+● Run formatter and clippy
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo fmt && cargo clippy --no-default-features
+  --features pg18 2>&1 | tail -10
+  └ 3 lines...
+
+Clean. Let me run the full test suite once more to confirm:
+
+● Final test run
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | tail -20
+  └ 20 lines...
+
+All 84 tests pass. Let me check the diff before committing:
+
+● Check diff stats
+  $ cd /Users/maropu/Repositories/pgvector-rx && git --no-pager diff --stat
+  └ 7 lines...
+
+● Check test file changes
+  $ cd /Users/maropu/Repositories/pgvector-rx && git --no-pager diff --stat -- tests/
+  └ 1 line...
+
+● Check status including untracked
+  $ cd /Users/maropu/Repositories/pgvector-rx && git status
+  └ 19 lines...
+
+Good. Let me count the lines changed (excluding tests/comments/blank):
+
+● Count lines of code added
+  $ cd /Users/maropu/Repositories/pgvector-rx && git diff -- src/ | grep '^+' | grep -v '^+++' |
+  grep -v '^+\s*$' | grep -v '^+\s*//' | wc -l
+  └ 2 lines...
+
+79 lines of code. Well within the 300-400 line target. Let me commit and push:
+
+● Commit changes
+  $ cd /Users/maropu/Repositories/pgvector-rx && git add -A && git commit -m "[#8] Fix cost
+  estimate and cosine normalization, add hnsw_vector test
+
+  Fix two bugs that caused the hnsw_vector regression test to fail:...
+  └ 23 lines...
+
+● Push to origin
+  $ cd /Users/maropu/Repositories/pgvector-rx && git push origin master 2>&1
+  └ 10 lines...
+
+Now let me wait for CI and verify:
+
+● Check CI status
+  $ cd /Users/maropu/Repositories/pgvector-rx && sleep 15 && gh run list --limit 1 2>&1
+  └ 3 lines...
+
+CI is running. Let me wait for it to complete:
+
+● Watch CI progress
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh run watch 22018021842 2>&1
+  └ 5 lines...
+
+● read_bash
+  └ Refreshing run status every 3 seconds. Press Ctrl+C to quit.
+
+● read_bash
+  └ Output too large to read at once (59.7 KB). Saved to: /var/folders/g6/ghvfrhk...
+
+● Check final CI status
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh run list --limit 1 2>&1
+  └ 3 lines...
+
+CI passed. Now let me update the issue tracking:
+
+● Comment on issue #8
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh issue comment 8 -b "✅ Progress on Phase 7 -
+  hnsw_vector regression test:
+
+  **Completed in commit 727344a:**
+  - Fixed cost estimate: returns infinity for queries without ORDER BY (prevents incorrect Index...
+  └ 13 lines...
+
+Let me also store the key memory about the normalization pattern:
+
+● store_memory
+  └ Memory stored successfully.
+
+● store_memory
+  └ Memory stored successfully.
+
+Let me verify the working tree is clean:
+
+● Verify clean state
+  $ cd /Users/maropu/Repositories/pgvector-rx && git status && echo "---" && git log --oneline -3
+  └ 9 lines...
+
+
+Total usage est:        3 Premium requests
+API time spent:         9m 55.804s
+Total session time:     21m 22.255s
+Total code changes:     +140 -8
+Breakdown by AI model:
+ claude-opus-4.6         8.1m in, 24.5k out, 8.0m cached (Est. 3 Premium requests)
+ claude-haiku-4.5        551.9k in, 7.0k out, 444.3k cached (Est. 0 Premium requests)

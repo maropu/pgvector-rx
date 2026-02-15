@@ -1,0 +1,813 @@
+
+
+I'll start by orienting myself - checking the repository state, open issues, and current build status.
+
+● Check git status
+  $ cd /Users/maropu/Repositories/pgvector-rx && git --no-pager status
+  └ 5 lines...
+
+● Check recent git history
+  $ cd /Users/maropu/Repositories/pgvector-rx && git --no-pager log --oneline -10
+  └ 11 lines...
+
+● List open GitHub issues
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh issue list --state open --limit 30 2>&1
+  └ 11 lines...
+
+Let me check the current test status and what's still failing.
+
+● List TAP test files
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls tests/t/ 2>&1
+  └ 10 lines...
+
+● List SQL regression tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls tests/sql/ tests/expected/ 2>&1
+  └ 3 lines...
+
+● View Phase 7 issue details
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh issue view 8 --json body | head -200 2>&1
+  └ 2 lines...
+
+The stored memory says all 24 TAP tests pass. Let me check the SQL regression tests status and whether there are any. Let me also check the current state more carefully.
+
+● List SQL directory
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls sql/ 2>&1
+  └ 1 line...
+
+● List reference SQL tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls references/pgvector/test/sql/hnsw_* 2>&1
+  └ 3 lines...
+
+● Check recent CI runs
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh run list --limit 5 2>&1
+  └ 7 lines...
+
+All CI runs are passing. The repository memories say all 24 TAP tests pass. The remaining work from Issue #8 is the 4 SQL regression tests. Let me check the reference SQL tests to understand what needs to be ported.
+
+● Count lines in reference SQL tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && wc -l references/pgvector/test/sql/hnsw_*.sql
+  references/pgvector/test/expected/hnsw_*.out 2>&1
+  └ 10 lines...
+
+● View hnsw_vector SQL test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat references/pgvector/test/sql/hnsw_vector.sql
+  2>&1
+  └ 118 lines...
+
+● View expected output for hnsw_vector
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat
+  references/pgvector/test/expected/hnsw_vector.out 2>&1
+  └ 202 lines...
+
+Now let me look at the other SQL tests and understand the existing SQL test infrastructure.
+
+● View hnsw_bit SQL test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat references/pgvector/test/sql/hnsw_bit.sql 2>&1
+  └ 36 lines...
+
+● View hnsw_halfvec SQL test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat references/pgvector/test/sql/hnsw_halfvec.sql
+  2>&1
+  └ 59 lines...
+
+● View hnsw_sparsevec SQL test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat references/pgvector/test/sql/hnsw_sparsevec.sql
+   2>&1
+  └ 69 lines...
+
+Now let me understand how the existing test infrastructure works and whether there are already SQL regression tests set up.
+
+● View Cargo.toml
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat Cargo.toml 2>&1
+  └ 40 lines...
+
+● View extension control file
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat pgvector_rx.control 2>&1
+  └ 7 lines...
+
+● Find existing SQL files
+  $ cd /Users/maropu/Repositories/pgvector-rx && find . -name "*.sql" -not -path "./references/*"
+  -not -path "./target/*" 2>&1
+  └ 3 lines...
+
+● View setup SQL
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat tests/pg_regress/sql/setup.sql 2>&1
+  └ 4 lines...
+
+● View existing hnsw_vector regression test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat tests/pg_regress/sql/hnsw_vector.sql 2>&1
+  └ 118 lines...
+
+● List all pg_regress test files
+  $ cd /Users/maropu/Repositories/pgvector-rx && find tests/pg_regress -type f 2>&1
+  └ 5 lines...
+
+● View current expected output
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat tests/pg_regress/expected/hnsw_vector.out 2>&1
+  └ 202 lines...
+
+● View setup expected output
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat tests/pg_regress/expected/setup.out 2>&1
+  └ 4 lines...
+
+So the hnsw_vector SQL regression test is already set up. I need to add the remaining 3 SQL regression tests (hnsw_bit, hnsw_halfvec, hnsw_sparsevec). Let me also check if there's a test schedule/runner configuration.
+
+● Find regression test configuration
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -r "pg_regress\|regress" Cargo.toml tests/
+  --include="*.toml" --include="*.rs" --include="*.sh" --include="*.cfg" 2>/dev/null | head -20
+  └ 2 lines...
+
+● Find regression test references in source
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -r "pg_regress\|hnsw_vector" src/
+  --include="*.rs" -l 2>&1
+  └ 1 line...
+
+● Find where regression tests are run
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -r "hnsw_vector\|pg_regress" src/ tests/
+  --include="*.rs" -n 2>&1 | head -30
+  └ 1 line...
+
+● View lib.rs header
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat src/lib.rs | head -50 2>&1
+  └ 50 lines...
+
+Let me understand how pgrx runs the SQL regression tests. The `tests/pg_regress/` directory follows the pgrx convention.
+
+● View expected output for hnsw_bit
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat references/pgvector/test/expected/hnsw_bit.out
+  2>&1
+  └ 52 lines...
+
+● View expected output for hnsw_halfvec
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat
+  references/pgvector/test/expected/hnsw_halfvec.out 2>&1
+  └ 103 lines...
+
+● View expected output for hnsw_sparsevec
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat
+  references/pgvector/test/expected/hnsw_sparsevec.out 2>&1
+  └ 113 lines...
+
+Now I have a clear picture. I need to:
+1. Add 3 SQL regression test files (hnsw_bit.sql, hnsw_halfvec.sql, hnsw_sparsevec.sql) with their expected outputs
+2. Verify they pass
+
+Let me first check how pgrx discovers regression tests, then run the existing one to verify the baseline works.
+
+● Run existing tests to check baseline
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | tail -30
+  └ 30 lines...
+
+All 120 tests pass. Now let me check if the SQL regression tests are also being run by `cargo pgrx test`.
+
+● Check if SQL regression tests run
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | grep -i
+  "regress\|hnsw_vector\|pg_regress\|sql test"
+  └ 1 line...
+
+The SQL regression tests aren't being run as part of `cargo pgrx test`. Let me check how pgrx expects regression tests to be structured and how they're executed.
+
+● Check pgrx regress command
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx regress --help 2>&1
+  └ 33 lines...
+
+pgrx has a `cargo pgrx regress` command. Let me run the existing hnsw_vector regression test first.
+
+● Run SQL regression tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx regress pg18 2>&1
+  └ 22 lines...
+
+The hnsw_vector regression test is failing! Let me see the diff.
+
+● Check pgrx data dir
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls -la /Users/maropu/.pgrx/18.2/ 2>&1 | head -10
+  └ 11 lines...
+
+● Find diff files
+  $ cd /Users/maropu/Repositories/pgvector-rx && find . -name "*.diff" -newer
+  tests/pg_regress/expected/hnsw_vector.out -not -path "./target/*" 2>&1
+  └ 1 line...
+
+● Run regression test with verbose output
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx regress pg18 -v 2>&1 | tail -60
+  └ 61 lines...
+
+The setup passed earlier but now it's re-using the database. The hnsw_vector test is failing. Let me check to see the actual output vs expected.
+
+● Run regression tests with fresh database
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx regress pg18 --resetdb -v 2>&1 | tail
+  -20
+  └ 21 lines...
+
+The hnsw_vector test fails. Let me use the `-a` (auto) flag to see what the actual output is and compare.
+
+● Run regression with auto-accept to see diffs
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx regress pg18 --resetdb -a 2>&1 | tail
+  -20
+  └ 21 lines...
+
+The `-a` flag updated the expected output with the actual output. Let me see what changed.
+
+● See what changed in the expected output
+  $ cd /Users/maropu/Repositories/pgvector-rx && git --no-pager diff
+  tests/pg_regress/expected/hnsw_vector.out 2>&1
+  └ 30 lines...
+
+There are two issues:
+1. The `DETAIL:` lines are missing for option validation errors (m, ef_construction bounds)
+2. The `HINT:` line is missing for the `hnsw.iterative_scan` invalid value error
+
+Let me revert the auto-accepted output and fix the code instead.
+
+● Revert auto-accepted output
+  $ cd /Users/maropu/Repositories/pgvector-rx && git checkout
+  tests/pg_regress/expected/hnsw_vector.out
+  └ 2 lines...
+
+Now let me find the relopts code that handles m and ef_construction validation, and the GUC code for iterative_scan.
+
+● Find relopts code
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn
+  "init_relopts\|relopt\|ef_construction\|DETAIL\|detail\|out of bounds" src/ --include="*.rs" |
+  head -40
+  └ 41 lines...
+
+● Read src/index/options.rs
+  └ 359 lines read
+
+I see the issue. The `DETAIL:` messages are generated by PostgreSQL's reloptions machinery. Let me check how the C pgvector handles this. Looking at the diff more carefully:
+
+1. **DETAIL lines missing for relopts bounds**: PostgreSQL's `add_int_reloption` should produce `DETAIL: Valid values are between "min" and "max".` automatically. This is likely a PostgreSQL version difference — PG 18 might not produce those DETAIL lines by default.
+
+2. **HINT line missing for enum GUC**: The `SET hnsw.iterative_scan = on;` error should include `HINT: Available values: off, relaxed_order, strict_order.`
+
+Wait, let me re-examine the diff. The actual output is MISSING the DETAIL/HINT lines, but the expected output HAS them. So the PostgreSQL 18 we're running doesn't produce those lines. Let me verify this is correct behavior for PG18.
+
+● Check PostgreSQL version
+  $ cd /Users/maropu/Repositories/pgvector-rx && /Users/maropu/.pgrx/18.2/pgrx-install/bin/psql -p
+  28818 -c "SELECT version();" pgvector_rx_regress 2>&1
+  └ 3 lines...
+
+● Check PostgreSQL version via socket
+  $ cd /Users/maropu/Repositories/pgvector-rx && /Users/maropu/.pgrx/18.2/pgrx-install/bin/psql -p
+  28818 -h /Users/maropu/.pgrx -c "SELECT version();" pgvector_rx_regress 2>&1
+  └ 5 lines...
+
+The server is running. Let me test the actual behavior directly.
+
+● Test relopt error message
+  $ cd /Users/maropu/Repositories/pgvector-rx && /Users/maropu/.pgrx/18.2/pgrx-install/bin/psql -p
+  28818 -h /Users/maropu/.pgrx pgvector_rx_regress -c "CREATE TABLE test_opts (val vector(3));
+  CREATE INDEX ON test_opts USING hnsw (val vector_l2_ops) WITH (m = 1);" 2>&1
+  └ 4 lines...
+
+Interesting! The DETAIL line IS present when running directly. The issue must be with how `pgrx regress` runs tests — it might be suppressing DETAIL/HINT messages. Let me check.
+
+● Test iterative_scan error message
+  $ cd /Users/maropu/Repositories/pgvector-rx && /Users/maropu/.pgrx/18.2/pgrx-install/bin/psql -p
+  28818 -h /Users/maropu/.pgrx pgvector_rx_regress -c "SET hnsw.iterative_scan = on;" 2>&1
+  └ 2 lines...
+
+Wait, `SET hnsw.iterative_scan = on;` succeeded? That shouldn't happen — `on` is not a valid value.
+
+● Check current iterative_scan value
+  $ cd /Users/maropu/Repositories/pgvector-rx && /Users/maropu/.pgrx/18.2/pgrx-install/bin/psql -p
+  28818 -h /Users/maropu/.pgrx pgvector_rx_regress -c "SHOW hnsw.iterative_scan;" 2>&1
+  └ 2 lines...
+
+The extension isn't loaded in this database session. Let me test more carefully:
+
+● Test with extension loaded
+  $ cd /Users/maropu/Repositories/pgvector-rx && /Users/maropu/.pgrx/18.2/pgrx-install/bin/psql -p
+  28818 -h /Users/maropu/.pgrx pgvector_rx_regress -c "CREATE EXTENSION IF NOT EXISTS pgvector_rx;
+  SET hnsw.iterative_scan = on;" 2>&1
+  └ 3 lines...
+
+That's a problem! `SET hnsw.iterative_scan = on;` should fail but it's succeeding. PostgreSQL is probably interpreting "on" as a boolean which matches some enum value. Let me check further:
+
+● Check what 'on' maps to
+  $ cd /Users/maropu/Repositories/pgvector-rx && /Users/maropu/.pgrx/18.2/pgrx-install/bin/psql -p
+  28818 -h /Users/maropu/.pgrx pgvector_rx_regress -c "CREATE EXTENSION IF NOT EXISTS pgvector_rx;
+  SET hnsw.iterative_scan = on; SHOW hnsw.iterative_scan;" 2>&1
+  └ 7 lines...
+
+So `on` is being accepted and shown as `on`. This shouldn't happen — `on` should not be a valid value for `hnsw.iterative_scan`. The pgvector C code must handle this differently.
+
+Let me look at how the original C code defines this enum GUC:
+
+● Find iterative_scan in reference C code
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "iterative_scan\|hnsw_iterative_scan"
+  references/pgvector/src/*.c references/pgvector/src/*.h 2>&1 | head -30
+  └ 18 lines...
+
+● View C iterative_scan enum options
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '20,30p' references/pgvector/src/hnsw.c 2>&1
+  └ 11 lines...
+
+The C code uses `DefineCustomEnumVariable` which is a different API from pgrx's `GucRegistry::define_enum_guc`. PostgreSQL's `DefineCustomEnumVariable` properly validates enum values and rejects "on". The pgrx `define_enum_guc` might be using a different mechanism that doesn't strictly validate.
+
+Wait — let me check the pgrx behavior more carefully. The issue is that pgrx might be accepting "on" via some boolean-to-enum coercion. This is likely a pgrx behavior difference. Let me check if the test actually gets the right behavior in CI. 
+
+Actually, let me refocus. The real failures in the regression test are:
+1. Missing `DETAIL:` lines for relopt bounds errors
+2. Missing `HINT:` line for iterative_scan invalid value 
+
+But we saw that DETAIL lines ARE present when running psql directly. So the issue is likely with how `cargo pgrx regress` captures output — it might be filtering DETAIL/HINT messages.
+
+Let me check the `--psql-verbosity` option:
+
+● Run regression with verbose psql output
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx regress pg18 --psql-verbosity verbose
+  --resetdb 2>&1 | tail -10
+  └ 11 lines...
+
+● Auto-accept with verbose to see output
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx regress pg18 --psql-verbosity verbose
+  --resetdb -a 2>&1 | tail -5
+  └ 6 lines...
+
+● Check diff with verbose psql
+  $ cd /Users/maropu/Repositories/pgvector-rx && git --no-pager diff
+  tests/pg_regress/expected/hnsw_vector.out 2>&1
+  └ 82 lines...
+
+Now I can see clearly. With verbose, the DETAIL and HINT lines ARE present. With default (non-verbose) verbosity, they're being suppressed. The issue is that the default psql verbosity mode only shows ERROR lines, not DETAIL/HINT.
+
+So the expected output needs to be updated to match the default (non-verbose) behavior, which doesn't include DETAIL/HINT lines. Let me revert and update the expected output properly.
+
+● Revert auto-accepted output
+  $ cd /Users/maropu/Repositories/pgvector-rx && git checkout
+  tests/pg_regress/expected/hnsw_vector.out
+  └ 2 lines...
+
+Now I need to understand the psql verbosity setting used by `cargo pgrx regress`. Looking at the previous diff, the default mode does NOT show DETAIL/HINT. The expected output was copied from the pgvector reference which uses `pg_regress` (a different test runner that shows DETAIL/HINT by default).
+
+The fix is to update the expected output file to remove DETAIL/HINT lines. Let me also check: does the iterative_scan `SET hnsw.iterative_scan = on;` correctly error in the default mode?
+
+Looking at the first diff (without verbose), the `SET hnsw.iterative_scan = on;` produces:
+```
+ERROR:  invalid value for parameter "hnsw.iterative_scan": "on"
+```
+without the HINT line. So it IS erroring correctly.
+
+The fix is straightforward: update the expected output to match pgrx regress default behavior (no DETAIL/HINT lines). Let me make this change:
+
+● Edit tests/pg_regress/expected/hnsw_vector.out (-4)
+
+● Edit tests/pg_regress/expected/hnsw_vector.out (-1)
+
+Now let me verify the hnsw_vector test passes:
+
+● Run regression test to verify fix
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx regress pg18 --resetdb 2>&1 | tail -10
+  └ 11 lines...
+
+The hnsw_vector test passes now. Now I need to add the 3 remaining SQL regression tests. Let me create the SQL and expected output files. I need to adapt the expected output to match pgrx regress default behavior (no DETAIL/HINT lines).
+
+Let me also check what special error handling exists for bit and sparsevec:
+
+● Find error messages for bit/sparsevec tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "type not supported\|cannot have more
+  than\|64000 dimensions\|1000 non-zero" src/ -r --include="*.rs" 2>&1
+  └ 12 lines...
+
+Good, the error messages exist. Let me check what error message is produced for "column cannot have more than 64000 dimensions for hnsw index":
+
+● Find max dimensions error for hnsw
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "64000\|cannot have more
+  than.*dimensions.*hnsw\|MAX_DIM.*hnsw\|hnsw.*dimensions" src/ -r --include="*.rs" 2>&1
+  └ 1 line...
+
+● Find column dimension error
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "column cannot\|dimensions for hnsw" src/
+  -r --include="*.rs" 2>&1
+  └ 1 line...
+
+● Find bit max dimensions constant
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "BIT_MAX_DIM\|BITVEC_MAX\|64000\|column.*dimen" src/ references/pgvector/src/hnsw*.c -r 2>&1 |
+  head -20
+  └ 6 lines...
+
+● Find max dimensions in Rust code
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "maxDimensions\|max_dimensions\|HNSW_MAX_DIM\|BIT_MAX" src/ -r --include="*.rs" 2>&1 | head -20
+  └ 12 lines...
+
+● Read src/index/build.rs lines 815-845
+  └ 31 lines read
+
+I notice there's no max dimensions check for the HNSW index. The C code checks if dimensions exceed `typeInfo->maxDimensions`. Let me check what that looks like:
+
+● View C code for dimension checks
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '670,695p'
+  references/pgvector/src/hnswbuild.c 2>&1
+  └ 27 lines...
+
+I need to add a max dimensions check. But first, let me also check what the bit vector test expects for "column cannot have more than 64000 dimensions for hnsw index". Let me look at what `maxDimensions` is for bit vectors:
+
+● Find bit maxDimensions in C
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "maxDimensions\|max_dimensions"
+  references/pgvector/src/bitvec.c references/pgvector/src/bitvec.h 2>&1
+  └ 1 line...
+
+● Find maxDimensions in all C source
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn "maxDimensions" references/pgvector/src/
+  2>&1
+  └ 14 lines...
+
+● View maxDimensions for bit type
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '1395,1420p'
+  references/pgvector/src/hnswutils.c 2>&1
+  └ 26 lines...
+
+● Find HNSW_MAX_DIM value
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep "HNSW_MAX_DIM\b"
+  references/pgvector/src/hnsw.h 2>&1
+  └ 2 lines...
+
+So for bit vectors, `maxDimensions = HNSW_MAX_DIM * 32 = 64000`. Let me check what the Rust code returns for bit support:
+
+● Find bit support in Rust code
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "hnsw_bit_support\|bit.*max_dim\|BIT.*MAX"
+  src/ -r --include="*.rs" 2>&1
+  └ 1 line...
+
+● Find bit type support
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "bit_support\|bitvec_support\|TYPE_INFO_PROC" src/ -r --include="*.rs" 2>&1
+  └ 7 lines...
+
+● Read src/index/build.rs lines 120-215
+  └ 96 lines read
+
+Now I need to also add a max dimensions check. Let me also look at what `get_max_dimensions` should return for each type. Let me create a helper function:
+
+● Read src/index/build.rs lines 795-835
+  └ 40 lines read
+
+I need to add a max dimensions check after the dimensions check. Let me also understand what `max_dimensions` is for each type from the type_info:
+
+- vector: `HNSW_MAX_DIM` (2000)
+- halfvec: `HNSW_MAX_DIM * 2` (4000) — wait, the memory says 32000. Let me check:
+
+● Check halfvec max dimensions
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "32000\|HALFVEC_MAX\|halfvec.*max" src/ -r
+  --include="*.rs" 2>&1 | head -10
+  └ 11 lines...
+
+Wait, `HNSW_MAX_DIM * 2` in bytes is about how many halfvec elements fit. But `max_dimensions` for halfvec's support function returns 32000 (which is `HALFVEC_MAX_DIM * 2`). Let me check the C code:
+
+● View C halfvec maxDimensions
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '1380,1400p'
+  references/pgvector/src/hnswutils.c 2>&1
+  └ 22 lines...
+
+So:
+- vector: `maxDimensions = HNSW_MAX_DIM = 2000`
+- halfvec: `maxDimensions = HNSW_MAX_DIM * 2 = 4000`
+- bit: `maxDimensions = HNSW_MAX_DIM * 32 = 64000`
+- sparsevec: `maxDimensions = SPARSEVEC_MAX_DIM`
+
+But the Rust code has `max_dimensions: 32000` for halfvec. That seems wrong. Let me check:
+
+● Read src/types/halfvec.rs lines 870-900
+  └ 30 lines read
+
+I see the issue. In the C code, `HNSW_MAX_DIM * 2 = 2000 * 2 = 4000`, but the Rust code has `32000`. This looks like a bug — it should be 4000 not 32000. But it might not be causing issues yet because the max dimensions check doesn't exist in the build path. 
+
+However, the halfvec value of max_dimensions is used to dispatch the type in `get_normalize_fn` — it checks `if type_info.max_dimensions == 32000`. So if I change it to 4000, the normalization dispatch would break. Let me check if this is used correctly:
+
+Wait, looking more carefully, the `max_dimensions` field in the Rust `HnswTypeInfo` doesn't include normalize/checkValue pointers (it's a simplified struct). The dispatch is based on `max_dimensions` value as a type discriminator. So 32000 is intentionally different from 4000 — it's being used as an identifier, not the actual max dimension limit.
+
+But for the dimension check in `ambuild`, I need the actual max dimensions. Let me look at the C code to understand: the C struct has `maxDimensions` which serves dual purpose — it's the actual limit AND used to identify the type. In C:
+- vector: 2000
+- halfvec: 4000 (actual limit is 4000 halfvec elements)
+- bit: 64000 (actual limit is 64000 bits)
+- sparsevec: SPARSEVEC_MAX_DIM
+
+The Rust code uses 32000 for halfvec which is wrong as a limit but it's currently only used for type dispatch. Let me think about the best approach...
+
+Actually, I need to refactor this slightly. The current `max_dimensions` value for halfvec (32000) is wrong per the C reference. It should be 4000. But the dispatch in `get_normalize_fn` currently uses this value to identify types. Let me fix the value AND update the dispatch.
+
+But wait — the halfvec SQL tests pass already. And the halfvec TAP tests pass. So changing `max_dimensions` could break things. Let me focus on what's needed for the regression tests:
+
+1. Fix the expected output for hnsw_vector (already done - remove DETAIL/HINT)
+2. Add hnsw_bit, hnsw_halfvec, hnsw_sparsevec SQL tests
+3. Add max dimensions check in ambuild (needed for bit test: `CREATE INDEX ON t USING hnsw ((val::bit(64001)) bit_hamming_ops);` should error)
+4. Add sparsevec non-zero elements check during insert (needed for sparsevec test)
+
+Let me check what dimension value bit(64001) gets:
+
+For bit type in PG, the typmod is the number of bits. So `bit(64001)` would have typmod=64001. The max for bit HNSW is 64000. So the check is: `dimensions > max_dimensions_for_type`.
+
+I need to get the correct max_dimensions for each type. Let me create a function that gets max_dimensions from the type_info, with a fallback to `HNSW_MAX_DIM` for vector type.
+
+● Read src/types/bitvec.rs lines 1-30
+  └ 30 lines read
+
+● Find bit support function
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "hnsw_bit_support\|bit.*support\|BIT_HNSW_MAX" src/types/bitvec.rs 2>&1
+  └ 2 lines...
+
+● Find bit support function
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "hnsw_bit_support" src/ -r --include="*.rs"
+   2>&1
+  └ 1 line...
+
+● Find bit support function registration
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "bit_support\|FUNCTION 3" src/ -r
+  --include="*.rs" 2>&1 | head -20
+  └ 10 lines...
+
+There's no FUNCTION 3 for bit types. Let me check the SQL registration for bit operator classes:
+
+● Find bit operator class SQL
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -A20 "bit_hamming_ops\|bit_jaccard_ops"
+  src/types/bitvec.rs | head -40 2>&1
+  └ 41 lines...
+
+The bit operator classes don't have FUNCTION 3, so `has_support` is false, and the fallback in `get_normalize_fn` assumes vector type. There's no `hnsw_bit_support` function at all. That means there's no max_dimensions for bit type available.
+
+Looking at the C reference:
+- `bit_hamming_ops` has `FUNCTION 3 hnsw_bit_support(internal)`
+- `bit_jaccard_ops` has `FUNCTION 3 hnsw_bit_support(internal)`
+
+Let me check:
+
+● Check C bit opclass definitions
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -B5 -A10 "bit_hamming_ops\|bit_jaccard_ops"
+  references/pgvector/src/hnsw.c 2>&1
+  └ 1 line...
+
+● Check C bit opclass SQL
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn "bit_hamming_ops\|bit_jaccard_ops"
+  references/pgvector/sql/ 2>&1
+  └ 7 lines...
+
+● View C bit opclass SQL
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '670,700p'
+  references/pgvector/sql/vector.sql 2>&1
+  └ 31 lines...
+
+So in the C code, both `bit_hamming_ops` and `bit_jaccard_ops` have `FUNCTION 3 hnsw_bit_support(internal)`. I need to:
+1. Create an `hnsw_bit_support` function
+2. Add `FUNCTION 3` to the bit operator classes
+3. Add max dimensions check in `ambuild`
+4. Fix halfvec max_dimensions to 4000 (matching C code) and update dispatch
+
+This is getting larger. Let me plan this out carefully.
+
+● Create ~/.copilot/session-state/ef2a1b9c-113a-45e1-b10b-8e7ff49af01f/plan.md (+34)
+
+● Read src/types/bitvec.rs
+  └ 323 lines read
+
+Now let me implement all the changes. I need to:
+
+1. Add `hnsw_bit_support` function in `bitvec.rs`
+2. Add `FUNCTION 3` to bit operator classes
+3. Fix halfvec `max_dimensions` from 32000 to 4000
+4. Update type dispatch in `get_normalize_fn` and `get_check_value_fn`
+5. Add `get_max_dimensions` function and max dimensions check in `ambuild`
+
+Let me also check what `SPARSEVEC_MAX_DIM` is:
+
+● Check sparsevec constants
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep "SPARSEVEC_MAX_DIM\|HNSW_MAX_NNZ"
+  src/hnsw_constants.rs src/types/sparsevec.rs 2>&1 | head -10
+  └ 9 lines...
+
+Now let me check the sparsevec test — it needs `array_fill(1, ARRAY[1001])::vector::sparsevec` to error during index build and insert. Let me check if we have the `vector -> sparsevec` cast:
+
+● Find vector-to-sparsevec cast
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "vector.*sparsevec\|sparsevec.*cast\|vector_to_sparsevec\|CAST.*sparsevec" src/ -r
+  --include="*.rs" 2>&1 | head -10
+  └ 11 lines...
+
+Good, the cast exists. Now let me also check: the sparsevec test's `INSERT INTO t (val) VALUES (array_fill(1, ARRAY[1001])::vector::sparsevec);` — the vector has 1001 elements. When converted to sparsevec with all 1s, it will have 1001 non-zero elements. The HNSW_MAX_NNZ is 1000, so this should error.
+
+The `CREATE INDEX ON t USING hnsw (val sparsevec_l2_ops);` should error during build (when the table has 1001-nnz sparsevec), and the `INSERT INTO t` should error during insert (after truncate + create index on empty table).
+
+Let me now implement all the changes. First, let me add `hnsw_bit_support`:
+
+● Edit src/types/bitvec.rs (+20)
+
+Now add the SQL function definition and FUNCTION 3 to operator classes:
+
+● Edit src/types/bitvec.rs (+3)
+
+Now add FUNCTION 3 to the operator classes:
+
+● Edit src/types/bitvec.rs (+4 -2)
+
+Now fix halfvec `max_dimensions` from 32000 to 4000:
+
+● Edit src/types/halfvec.rs (+1 -1)
+
+Now update the dispatch in `get_normalize_fn` and `get_check_value_fn` in build.rs:
+
+● Edit src/index/build.rs (+1 -1)
+
+Now I need to add a `get_max_dimensions` function and the max dimensions check in `ambuild`. Let me look at the build.rs code more carefully to see where to add the helper:
+
+● Read src/index/build.rs lines 175-212
+  └ 37 lines read
+
+Now let me add the `get_max_dimensions` function after `get_check_value_fn`:
+
+● Read src/index/build.rs lines 211-220
+  └ 10 lines read
+
+● Edit src/index/build.rs (+24)
+
+Now add the max dimensions check in `ambuild`, after the "column does not have dimensions" check:
+
+● Read src/index/build.rs lines 840-860
+  └ 21 lines read
+
+● Edit src/index/build.rs (+9)
+
+Now I also need to check if there's a similar max dimensions check needed during insert (for the sparsevec test that does INSERT after index creation on an empty table):
+
+● Check insert sparsevec validation
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "hnsw_max_nnz\|check_value\|HNSW_MAX_NNZ\|non-zero.*hnsw" src/index/insert.rs 2>&1
+  └ 3 lines...
+
+● Read src/index/insert.rs lines 1240-1260
+  └ 21 lines read
+
+Good, the insert path already validates sparsevec nnz. The sparsevec test should work.
+
+Now let me build and test to make sure the code compiles:
+
+● Build to check compilation
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo build --features pg18 --no-default-features
+  2>&1 | tail -10
+  └ 3 lines...
+
+Good, it compiles. Now let me create the SQL test files and expected outputs. First, I need to stop the existing pgrx postgres instance, then create the test files:
+
+● Stop existing postgres instance
+  $ cd /Users/maropu/Repositories/pgvector-rx && /Users/maropu/.pgrx/18.2/pgrx-install/bin/pg_ctl -D
+   /Users/maropu/.pgrx/data-18 stop 2>&1
+  └ 3 lines...
+
+Now create the SQL test files. Let me start with `hnsw_bit.sql`:
+
+● Create tests/pg_regress/sql/hnsw_bit.sql (+36)
+
+● Create tests/pg_regress/sql/hnsw_halfvec.sql (+59)
+
+● Create tests/pg_regress/sql/hnsw_sparsevec.sql (+69)
+
+Now I need to create the expected output files. Let me use `cargo pgrx regress` with `-a` to auto-generate them, then verify they match the reference:
+
+● Run regression tests with auto-accept
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx regress pg18 --resetdb -a 2>&1 | tail
+  -15
+  └ 16 lines...
+
+There are 3 failures. But since they were auto-accepted, the expected output was updated. Let me check what the differences are from the reference. First, let me check what happened with each one. They likely failed on the first run because the expected files were created fresh but then the auto-accept promoted the output. Let me re-run to see if they pass now:
+
+● Re-run regression tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx regress pg18 --resetdb 2>&1 | tail -10
+  └ 11 lines...
+
+All 5 tests pass (setup + 4 SQL regression tests). Now let me verify the expected outputs match the reference expectations. Let me compare:
+
+● Compare bit expected output
+  $ cd /Users/maropu/Repositories/pgvector-rx && diff tests/pg_regress/expected/hnsw_bit.out
+  references/pgvector/test/expected/hnsw_bit.out 2>&1
+  └ 1 line...
+
+● Compare halfvec expected output
+  $ cd /Users/maropu/Repositories/pgvector-rx && diff tests/pg_regress/expected/hnsw_halfvec.out
+  references/pgvector/test/expected/hnsw_halfvec.out 2>&1
+  └ 1 line...
+
+● Compare sparsevec expected output
+  $ cd /Users/maropu/Repositories/pgvector-rx && diff tests/pg_regress/expected/hnsw_sparsevec.out
+  references/pgvector/test/expected/hnsw_sparsevec.out 2>&1
+  └ 1 line...
+
+All three expected outputs match the reference exactly. Now let me also verify the hnsw_vector expected output:
+
+● Compare vector expected output
+  $ cd /Users/maropu/Repositories/pgvector-rx && diff tests/pg_regress/expected/hnsw_vector.out
+  references/pgvector/test/expected/hnsw_vector.out 2>&1
+  └ 11 lines...
+
+The hnsw_vector test differs from the reference only in DETAIL/HINT lines which are not shown by pgrx regress's default psql verbosity. This is expected and correct.
+
+Now let me run the full test suite to make sure nothing is broken:
+
+● Run full test suite
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | tail -30
+  └ 30 lines...
+
+All 120 tests pass. Let me also run `cargo fmt` and `cargo clippy`:
+
+● Format and lint
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo fmt && cargo clippy --features pg18
+  --no-default-features --all-targets -- -D warnings 2>&1 | tail -10
+  └ 11 lines...
+
+There's a pre-existing clippy warning. Let me check if this is a pre-existing issue:
+
+● Check if clippy issue is pre-existing
+  $ cd /Users/maropu/Repositories/pgvector-rx && git stash && cargo clippy --features pg18
+  --no-default-features --all-targets -- -D warnings 2>&1 | tail -10
+  └ 12 lines...
+
+Yes, it's a pre-existing issue. Let me restore my changes:
+
+● Restore changes
+  $ cd /Users/maropu/Repositories/pgvector-rx && git stash pop 2>&1
+  └ 25 lines...
+
+Good. The clippy issue is pre-existing. Let me verify my changes don't introduce any NEW clippy warnings (the pre-existing one is not my responsibility):
+
+● Check for new clippy warnings
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo clippy --features pg18 --no-default-features
+  --all-targets 2>&1 | grep -E "warning|error" | grep -v "manual_slice_size_calculation" | grep -v
+  "could not compile" | head -20
+  └ 3 lines...
+
+Only the pre-existing warning. Let me also verify the changes look correct:
+
+● Review all changes
+  $ cd /Users/maropu/Repositories/pgvector-rx && git --no-pager diff 2>&1
+  └ 161 lines...
+
+The changes look clean and correct. Let me run the regression tests one final time to confirm:
+
+● Final regression test verification
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx regress pg18 --resetdb 2>&1 | tail -10
+  └ 11 lines...
+
+All 4 SQL regression tests pass (plus setup). Now let me commit and push:
+
+● Stage all changes
+  $ cd /Users/maropu/Repositories/pgvector-rx && git add -A && git --no-pager status 2>&1
+  └ 16 lines...
+
+● Commit changes
+  $ cd /Users/maropu/Repositories/pgvector-rx && git commit -m "[#8] Add all 4 SQL regression
+  tests (bit, halfvec, sparsevec, vector)
+
+  Add the remaining 3 SQL regression tests (hnsw_bit, hnsw_halfvec,
+  hnsw_sparsevec) to complement the existing hnsw_vector test. All 4...
+  └ 24 lines...
+
+● Push to remote
+  $ cd /Users/maropu/Repositories/pgvector-rx && git push origin master 2>&1
+  └ 10 lines...
+
+Now let me wait for CI and verify it passes:
+
+● Check CI status
+  $ sleep 30 && cd /Users/maropu/Repositories/pgvector-rx && gh run list --limit 3 2>&1
+  └ 5 lines...
+
+CI is running. Let me wait for it to complete:
+
+● Watch CI run
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh run watch 22024885658 2>&1
+  └ 9 lines...
+
+● Check CI result
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh run list --limit 1 2>&1
+  └ 3 lines...
+
+CI passed. Now let me update the issue tracking:
+
+● Update issue with progress
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh issue comment 8 -b "✅ All 4 SQL regression
+  tests now pass (hnsw_vector, hnsw_bit, hnsw_halfvec, hnsw_sparsevec) via \`cargo pgrx regress
+  pg18\`. Completed in commit $(git rev-parse --short HEAD).
+
+  Changes:...
+  └ 11 lines...
+
+Let me also store some useful memories:
+
+● store_memory
+  └ Memory stored successfully.
+
+● store_memory
+  └ Memory stored successfully.
+
+● store_memory
+  └ Memory stored successfully.
+
+
+Total usage est:        3 Premium requests
+API time spent:         9m 15.183s
+Total session time:     21m 23.875s
+Total code changes:     +260 -9
+Breakdown by AI model:
+ claude-opus-4.6         8.5m in, 25.3k out, 8.3m cached (Est. 3 Premium requests)

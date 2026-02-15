@@ -1,0 +1,868 @@
+
+
+I'll start by orienting myself - checking the repository state, open issues, and current build status.
+
+● Check git status and recent commits
+  $ cd /Users/maropu/Repositories/pgvector-rx && git --no-pager status && echo "---" && git
+  --no-pager log --oneline -10
+  └ 16 lines...
+
+● List open GitHub issues
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh issue list --state open --limit 30 2>/dev/null
+  └ 11 lines...
+
+● Check recent CI runs
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh run list --limit 5 2>/dev/null
+  └ 7 lines...
+
+Good - CI is green. Let me check the current state of Issue #8 and the TAP test results to understand what's passing and what's failing.
+
+● List TAP test files
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls tests/t/
+  └ 5 lines...
+
+● List reference TAP tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls references/pgvector/test/t/ | head -40
+  └ 41 lines...
+
+● View Issue #8 details
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh issue view 8 2>/dev/null | head -80
+  └ 80 lines...
+
+Let me check which TAP tests we already have ported vs which are missing, and look at the issue comments for recent progress notes.
+
+● Compare reference vs ported tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && diff <(ls references/pgvector/test/t/ | grep hnsw |
+   sort) <(ls tests/t/ | grep -v log | sort) 2>/dev/null
+  └ 15 lines...
+
+● View Issue #8 comments
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh issue view 8 --comments 2>/dev/null | tail -60
+  └ 61 lines...
+
+So the missing TAP tests are all for non-vector types (bit, halfvec, sparsevec) which haven't been implemented yet. Let me focus on the vector-only tests that haven't been fully verified yet. Let me check what's currently failing and investigate the most impactful fix.
+
+● List current test files
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls tests/t/ | grep -v log
+  └ 12 lines...
+
+● Check if iterative scan test exists
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat tests/t/043_hnsw_iterative_scan.pl 2>/dev/null
+  | head -5; echo "---EXISTS: $?"
+  └ 7 lines...
+
+● Check if iterative scan recall test exists
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat tests/t/044_hnsw_iterative_scan_recall.pl
+  2>/dev/null | head -5; echo "---EXISTS: $?"
+  └ 7 lines...
+
+Good. Tests 043 and 044 exist but haven't been run yet. Let me first run the existing tests to see current status, then identify what to work on. Let me check which tests we know pass and which are still unverified:
+
+● Check WAL test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat tests/t/010_hnsw_wal.pl | head -10
+  └ 11 lines...
+
+● Check inserts test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat tests/t/016_hnsw_inserts.pl | head -10
+  └ 11 lines...
+
+Let me understand the current state better. The issue comments say several tests haven't been run yet (010, 016, 043, 044). Let me run these to see which ones pass. But first let me check if we need `cargo pgrx install --release` before running TAP tests.
+
+● Check TAP test runner script
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat tests/run_tap_tests.sh
+  └ 69 lines...
+
+Let me first build with release and install, then run the unverified TAP tests.
+
+● Install extension for TAP tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx install --release --pg-config
+  ~/.pgrx/18.2/pgrx-install/bin/pg_config 2>&1 | tail -5
+  └ 6 lines...
+
+Now let me run the unverified TAP tests to see which pass and which fail:
+
+● Run inserts TAP test
+  $ cd /Users/maropu/Repositories/pgvector-rx && ./tests/run_tap_tests.sh 016_hnsw_inserts 2>&1 |
+  tail -30
+  └ 31 lines...
+
+● Get failed test details
+  $ cd /Users/maropu/Repositories/pgvector-rx && ./tests/run_tap_tests.sh 016_hnsw_inserts 2>&1 |
+  grep "not ok"
+  └ 1 line...
+
+● Get failed test details with comments
+  $ cd /Users/maropu/Repositories/pgvector-rx && ./tests/run_tap_tests.sh 016_hnsw_inserts 2>&1 |
+  grep -E "(not ok|#)"
+  └ 1 line...
+
+● Get line numbers of failures
+  $ cd /Users/maropu/Repositories/pgvector-rx && ./tests/run_tap_tests.sh 016_hnsw_inserts 2>&1 2>&1
+   | grep -n "not ok"
+  └ 1 line...
+
+● Capture and search test output
+  $ cd /Users/maropu/Repositories/pgvector-rx && ./tests/run_tap_tests.sh 016_hnsw_inserts 2>&1 >
+  /tmp/tap_016.log 2>&1; grep "not ok" /tmp/tap_016.log
+  └ 1 line...
+
+● Run inserts test with prove directly
+  $ cd /Users/maropu/Repositories/pgvector-rx/tests/t && prove -v 016_hnsw_inserts.pl 2>&1 | tee
+  /tmp/tap_016.log | tail -40
+  └ 14 lines...
+
+Need to use the run_tap_tests.sh script. Let me capture output more carefully:
+
+● Run inserts test and capture output
+  $ cd /Users/maropu/Repositories/pgvector-rx && bash tests/run_tap_tests.sh 016_hnsw_inserts >
+  /tmp/tap_016.log 2>&1; cat /tmp/tap_016.log | grep -E "^(ok|not ok|#)" | head -40
+  └ 1 line...
+
+● Check tap output
+  $ cat /tmp/tap_016.log | head -10
+  └ 11 lines...
+
+Stale test directories. Let me clean up and retry:
+
+● Clean stale test dirs
+  $ cd /Users/maropu/Repositories/pgvector-rx/tests/t && rm -rf tmp_check
+  └ 1 line...
+
+Now let me run the unverified tests one by one. Let me start with the ones that are likely simpler:
+
+● Run inserts TAP test
+  $ cd /Users/maropu/Repositories/pgvector-rx && bash tests/run_tap_tests.sh 016_hnsw_inserts >
+  /tmp/tap_016.log 2>&1; echo "EXIT: $?"; grep -E "(^not ok|Failed|Result)" /tmp/tap_016.log
+  └ 20 lines...
+
+● Check detailed test output
+  $ cat /tmp/tap_016.log | head -60
+  └ 61 lines...
+
+The inserts test has failures - some queries return fewer results than expected (7 or 9 instead of 10), and there's a concurrent insert count issue. Let me look at the test to understand what it's checking:
+
+● Read inserts test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat tests/t/016_hnsw_inserts.pl
+  └ 75 lines...
+
+The test does 10 concurrent inserts (pgbench with 10 clients, 1 transaction each), then queries for nearest neighbors - expects all 10 results. This is a concurrency issue with concurrent inserts into HNSW. The other failures (lines 70, 72) are about bulk concurrent inserts returning almost 1000 results and idx_scan count.
+
+Let me now run the other unverified tests to get a full picture:
+
+● Run WAL TAP test
+  $ cd /Users/maropu/Repositories/pgvector-rx/tests/t && rm -rf tmp_check 2>/dev/null; cd
+  /Users/maropu/Repositories/pgvector-rx && bash tests/run_tap_tests.sh 010_hnsw_wal >
+  /tmp/tap_010.log 2>&1; echo "EXIT: $?"; grep -E "(^not ok|Failed|Result)" /tmp/tap_010.log
+  └ 3 lines...
+
+● Run iterative scan TAP test
+  $ cd /Users/maropu/Repositories/pgvector-rx/tests/t && rm -rf tmp_check 2>/dev/null; cd
+  /Users/maropu/Repositories/pgvector-rx && bash tests/run_tap_tests.sh 043_hnsw_iterative_scan >
+  /tmp/tap_043.log 2>&1; echo "EXIT: $?"; grep -E "(^not ok|Failed|Result)" /tmp/tap_043.log
+  └ 3 lines...
+
+● Run iterative scan recall TAP test
+  $ cd /Users/maropu/Repositories/pgvector-rx/tests/t && rm -rf tmp_check 2>/dev/null; cd
+  /Users/maropu/Repositories/pgvector-rx && bash tests/run_tap_tests.sh
+  044_hnsw_iterative_scan_recall > /tmp/tap_044.log 2>&1; echo "EXIT: $?"; grep -E "(^not
+  ok|Failed|Result)" /tmp/tap_044.log
+  └ 3 lines...
+
+Let me also run the known-failing tests to get current status:
+
+● Run insert recall TAP test
+  $ cd /Users/maropu/Repositories/pgvector-rx/tests/t && rm -rf tmp_check 2>/dev/null; cd
+  /Users/maropu/Repositories/pgvector-rx && bash tests/run_tap_tests.sh
+  013_hnsw_vector_insert_recall > /tmp/tap_013.log 2>&1; echo "EXIT: $?"; grep -E "(^not
+  ok|Failed|Result|got:|expected:)" /tmp/tap_013.log
+  └ 14 lines...
+
+● Check insert recall failure details
+  $ grep -A3 "Failed test" /tmp/tap_013.log | head -30
+  └ 25 lines...
+
+Very low recall during concurrent insert. Let me look at the test to understand the threshold:
+
+● Read insert recall test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat tests/t/013_hnsw_vector_insert_recall.pl
+  └ 111 lines...
+
+This test uses 10 concurrent clients doing 1000 transactions each (10,000 concurrent inserts). The recall is very low (0.01-0.02), meaning the concurrent insert path is broken - it's basically not finding most elements after concurrent inserts.
+
+This is a critical bug. Let me investigate the concurrent insert issue. The problem is likely related to locking during concurrent inserts - elements may not be properly connected in the graph when multiple inserts happen simultaneously.
+
+Let me look at the insert code:
+
+● Read src/index/insert.rs
+  └ 1 line read
+
+● Check insert file size
+  $ cd /Users/maropu/Repositories/pgvector-rx && wc -l src/index/insert.rs
+  └ 2 lines...
+
+● Read src/index/insert.rs lines 1-100
+  └ 100 lines read
+
+● Read src/index/insert.rs lines 100-250
+  └ 150 lines read
+
+● Read src/index/insert.rs lines 250-450
+  └ 201 lines read
+
+● Read src/index/insert.rs lines 450-700
+  └ 251 lines read
+
+● Read src/index/insert.rs lines 700-976
+  └ 277 lines read
+
+Now let me look at the original C implementation for aminsert to understand how it handles concurrency:
+
+● Read C insert implementation header
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat references/pgvector/src/hnswinsert.c | head -80
+  └ 80 lines...
+
+The C code has a `HnswFreeOffset` function that reuses deleted element slots! Our Rust implementation doesn't do this. But more importantly for the concurrent insert issue, let me look at the core insert flow in the C code:
+
+● Find key functions in C insert
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "UpdateNeighborsOnDisk\|HnswInsertTuple\|Lo
+  ckPage\|UnlockPage\|FindElementNeighbors\|aminsert\|InsertTupleData\|UpdateElement"
+  references/pgvector/src/hnswinsert.c
+  └ 12 lines...
+
+● Read C InsertTupleOnDisk function
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '690,755p'
+  references/pgvector/src/hnswinsert.c
+  └ 67 lines...
+
+Interesting. The C code holds the HNSW_UPDATE_LOCK for the entire duration of both finding neighbors AND updating the graph. Let me check our Rust code - we release the lock BEFORE updating neighbors!
+
+Let me reread our insert flow more carefully:
+
+● Read src/index/insert.rs lines 671-838
+  └ 168 lines read
+
+Now let me check the C code's `UpdateGraphOnDisk` to see the full flow:
+
+● Find UpdateGraphOnDisk in C code
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "UpdateGraphOnDisk\|WriteElement\|UpdateNeighborsOnDisk" references/pgvector/src/hnswinsert.c |
+  head -20
+  └ 5 lines...
+
+● Read UpdateGraphOnDisk function
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '663,690p'
+  references/pgvector/src/hnswinsert.c
+  └ 29 lines...
+
+Now let me look at the C version's `HnswUpdateNeighborsOnDisk` which is crucial:
+
+● Read UpdateNeighborsOnDisk in C
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '540,662p'
+  references/pgvector/src/hnswinsert.c
+  └ 124 lines...
+
+Now let me find `GetUpdateIndex` which determines where to place the back-connection:
+
+● Find GetUpdateIndex function
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "GetUpdateIndex"
+  references/pgvector/src/hnswinsert.c
+  └ 3 lines...
+
+● Read GetUpdateIndex function
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '403,538p'
+  references/pgvector/src/hnswinsert.c
+  └ 137 lines...
+
+Now I see the critical difference! The C code's `GetUpdateIndex` does something our Rust code doesn't:
+
+1. It loads the *latest* neighbors for each neighbor element
+2. If the neighbor slot is full (all `lm` slots used), it uses `HnswUpdateConnection` to **select which existing neighbor to replace** with the new element (using the heuristic algorithm)
+3. Our Rust code in `update_neighbor_on_disk` only adds to free slots and simply skips if all slots are full: `// All slots full — skip (simplified: don't replace neighbors yet)`
+
+This is the root cause! When all neighbor slots are full, the C code can still replace a farther neighbor with the closer new element. Our Rust code just gives up, leaving the graph disconnected.
+
+Let me also check `HnswUpdateConnection` and `LoadElementsForInsert`:
+
+● Find key helper functions
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "HnswUpdateConnection\|LoadElementsForInsert\|HnswLoadNeighbors"
+  references/pgvector/src/hnswinsert.c
+  └ 6 lines...
+
+● Read HnswLoadNeighbors and LoadElementsForInsert
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '347,401p'
+  references/pgvector/src/hnswinsert.c
+  └ 56 lines...
+
+Now let me understand `HnswUpdateConnection`:
+
+● Find HnswUpdateConnection definition
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "HnswUpdateConnection"
+  references/pgvector/src/hnsw.h references/pgvector/src/hnsw*.c
+  └ 5 lines...
+
+● Read HnswUpdateConnection
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '1173,1250p'
+  references/pgvector/src/hnswutils.c
+  └ 79 lines...
+
+Now I fully understand the issue. The C code's `HnswUpdateConnection` uses `SelectNeighbors` (the neighbor selection heuristic) to determine which existing neighbor to evict and replace with the new element. Our Rust code simply gives up when all slots are full.
+
+This is the most impactful bug to fix. Let me plan the implementation:
+
+1. In `update_neighbor_on_disk`, when all slots are full, load the neighbor's current connections, compute distances, run the neighbor selection heuristic, and if the new element should replace one, do the replacement.
+
+Let me create a plan and start implementing:
+
+● Create ~/.copilot/session-state/d3257493-08f5-4aec-8746-53a46f40fa3b/plan.md (+33)
+
+Now let me look at the graph module's select_neighbors to understand how to apply it:
+
+● List public items in graph module
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "pub.*fn\|pub.*struct\|pub.*enum\|pub.*trait" src/graph/mod.rs
+  └ 12 lines...
+
+● Read src/graph/mod.rs lines 269-355
+  └ 87 lines read
+
+The in-memory `select_neighbors` uses indices into an element arena, which doesn't work for on-disk operations. I need to implement an on-disk version of the neighbor selection heuristic for the back-connection update.
+
+Let me look at the C code's `SelectNeighbors` to understand the full flow:
+
+● Find SelectNeighbors in utils
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "SelectNeighbors"
+  references/pgvector/src/hnswutils.c | head -10
+  └ 4 lines...
+
+● Read SelectNeighbors function
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '1054,1172p'
+  references/pgvector/src/hnswutils.c
+  └ 120 lines...
+
+Now I understand the full algorithm. The key insight is:
+
+When updating a neighbor's back-connections and all slots are full:
+1. Load the neighbor's current connections (with their distances to the neighbor)  
+2. Add the new element as a candidate
+3. Run `SelectNeighbors` heuristic on (existing neighbors + new element)
+4. If one of the existing neighbors gets pruned, replace it with the new element
+5. The pruned element is the one that gets evicted
+
+The `closerSet` caching is an optimization we can skip for correctness first. Let me implement this.
+
+I need to implement an on-disk version that:
+1. Loads neighbor TIDs from the neighbor tuple
+2. For each neighbor, loads its element data to compute distance to the neighbor's own vector  
+3. Adds the new element as a candidate
+4. Runs selection to see which gets pruned
+5. Replaces if needed
+
+Let me now implement this. The key function to rewrite is `update_neighbor_on_disk` and add the helper `get_update_index`:
+
+● Read src/index/scan.rs lines 1-50
+  └ 50 lines read
+
+● Read src/index/scan.rs lines 50-140
+  └ 91 lines read
+
+Now let me look at `load_element` and `load_neighbor_tids`:
+
+● Find load functions
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "pub.*fn load_element\|pub.*fn
+  load_neighbor_tids\|fn load_neighbor_tids\|fn load_element" src/index/scan.rs
+  └ 3 lines...
+
+● Read src/index/scan.rs lines 155-290
+  └ 136 lines read
+
+Now I have a clear picture. Let me implement the fix. The key changes are:
+
+1. Rewrite `update_neighbor_on_disk` to implement the full neighbor update logic (load neighbors, compute distances, run selection heuristic, replace if needed)
+2. The `update_neighbors_on_disk` function needs to pass the distance from the neighbor to the new element
+
+Let me also check how the C code loads neighbor element data for computing distances in the update path:
+
+● Find HnswLoadElement
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "HnswLoadElement"
+  references/pgvector/src/hnsw*.c | head -10
+  └ 11 lines...
+
+Now I have enough understanding. Let me implement the fix. The approach:
+
+1. Add a function `get_update_index` that loads the neighbor's current connections, computes distances, and determines if the new element should replace one
+2. Rewrite `update_neighbor_on_disk` to use this result
+
+The on-disk neighbor selection needs to work differently from the in-memory version since we can't use arena indices. I'll work with distances computed using the PostgreSQL distance function.
+
+● Read src/index/insert.rs lines 290-430
+  └ 141 lines read
+
+Now I need to understand how `HnswUpdateConnection` determines the pruned element - it runs `SelectNeighbors` on (existing neighbors + new element), and the first element in the discard list (`wd`) that wasn't placed back into `r` is the one to be replaced. The C code sets `*pruned = wd[wdoff]` (the first not-yet-placed discard) or `linitial(w)` (the last candidate from `w`).
+
+Let me now implement. I'll restructure the update to:
+1. Split into two phases: first determine the update index (without buffer lock), then apply it (with buffer lock)
+2. For determining update index, load neighbor TIDs, then load element data for each to compute distances to the neighbor element
+
+Let me also check what functions I can use to load a vector's datum from an element on disk:
+
+● Find element value loading code
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "fn load_element_value\|fn
+  get_element_value\|data_ptr\|value_datum" src/index/scan.rs | head -10
+  └ 4 lines...
+
+Now I'll implement the fix. The key insight from the C code is:
+
+1. `GetUpdateIndex` loads neighbors WITHOUT locking the buffer (since selection can take time)  
+2. Then `UpdateNeighborOnDisk` acquires the exclusive lock and writes
+3. If `idx == -2` (free slot found in step 1), verify free slot still exists at write time
+4. If `idx >= 0` (replace existing neighbor at specific index), write to that index
+
+Let me now write the code:
+
+● Edit src/index/insert.rs (+371 -15)
+
+Now let me build and test:
+
+● Check compilation
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --no-default-features --features pg18
+  2>&1 | tail -20
+  └ 21 lines...
+
+Need to import `load_neighbor_tids` and fix type annotation:
+
+● Read src/index/insert.rs lines 10-23
+  └ 13 lines read
+
+● Edit src/index/insert.rs (+1 -1)
+
+Now fix the type annotation:
+
+● Read src/index/insert.rs lines 360-380
+  └ 21 lines read
+
+● Edit src/index/insert.rs (+1 -1)
+
+● Check compilation
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --no-default-features --features pg18
+  2>&1 | tail -20
+  └ 15 lines...
+
+It compiles. Let me remove the unused field:
+
+● Read src/index/insert.rs lines 453-480
+  └ 28 lines read
+
+● Edit src/index/insert.rs (+2 -6)
+
+● Check compilation
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --no-default-features --features pg18
+  2>&1 | tail -5
+  └ 3 lines...
+
+Clean build. Now let me run the pgrx tests to make sure existing tests still pass:
+
+● Run pgrx tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | tail -30
+  └ 30 lines...
+
+All 90 tests pass. Now let me install and run the TAP tests:
+
+● Install extension for TAP tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx install --release --pg-config
+  ~/.pgrx/18.2/pgrx-install/bin/pg_config 2>&1 | tail -5
+  └ 6 lines...
+
+● Run build recall test (should still pass)
+  $ cd /Users/maropu/Repositories/pgvector-rx/tests/t && rm -rf tmp_check 2>/dev/null; cd
+  /Users/maropu/Repositories/pgvector-rx && bash tests/run_tap_tests.sh 012_hnsw_vector_build_recall
+   > /tmp/tap_012.log 2>&1; echo "EXIT: $?"; grep -E "(Result|Failed)" /tmp/tap_012.log
+  └ 3 lines...
+
+Good, build recall still passes. Now let me run the insert recall test:
+
+● Run insert recall test
+  $ cd /Users/maropu/Repositories/pgvector-rx/tests/t && rm -rf tmp_check 2>/dev/null; cd
+  /Users/maropu/Repositories/pgvector-rx && bash tests/run_tap_tests.sh
+  013_hnsw_vector_insert_recall > /tmp/tap_013.log 2>&1; echo "EXIT: $?"; grep -E
+  "(Result|Failed|not ok|got:|expected:)" /tmp/tap_013.log
+  └ 3 lines...
+
+Insert recall now PASSES! Let me run the inserts test too:
+
+● Run inserts test
+  $ cd /Users/maropu/Repositories/pgvector-rx/tests/t && rm -rf tmp_check 2>/dev/null; cd
+  /Users/maropu/Repositories/pgvector-rx && bash tests/run_tap_tests.sh 016_hnsw_inserts >
+  /tmp/tap_016.log 2>&1; echo "EXIT: $?"; grep -E "(Result|Failed|not ok)" /tmp/tap_016.log
+  └ 10 lines...
+
+Good progress! Down from 7 failures to 2. Let me check what the remaining failures are:
+
+● Check remaining failures
+  $ grep -B1 -A5 "not ok" /tmp/tap_016.log | head -30
+  └ 16 lines...
+
+● Get failure details
+  $ grep -E "(#.*Failed|#.*got|#.*expected|#.*>=)" /tmp/tap_016.log
+  └ 7 lines...
+
+Two remaining issues:
+1. Test 64 (line 47): One of the 20 iterations of 10 concurrent inserts returned 8 instead of 10 results
+2. Test 85 (line 72): `idx_scan` returns 0 instead of 21
+
+Test #1 is a concurrency race condition - occasionally an insert doesn't get connected properly. This could happen with the HNSW algorithm (even the C code notes "Elements may lose all incoming connections with the HNSW algorithm").
+
+Test #2 (idx_scan = 0) is about PostgreSQL statistics not tracking index scans properly. Let me check if we're missing some stats updates. Let me look at what `idx_scan` tracks:
+
+● Check index scan stats in scan.rs
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "pgstat_count_index_scan\|pg_stat\|IndexScanDesc" src/index/scan.rs | head -10
+  └ 5 lines...
+
+● Find pgstat_count_index_scan usage
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn "pgstat_count_index_scan" src/
+  references/pgvector/src/hnsw*.c
+  └ 2 lines...
+
+We're missing `pgstat_count_index_scan`! The C code calls it during `amrescan`. Let me check where in the scan flow:
+
+● Check C amrescan for pgstat call
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '185,200p'
+  references/pgvector/src/hnswscan.c
+  └ 16 lines...
+
+The `pgstat_count_index_scan` is called in `amgettuple`. Let me check our code:
+
+● Find amgettuple in our scan code
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "amgettuple\|fn.*gettuple"
+  src/index/scan.rs
+  └ 2 lines...
+
+● Read src/index/scan.rs lines 686-760
+  └ 75 lines read
+
+I see - we're missing the `pgstat_count_index_scan` call. Let me add it:
+
+● Edit src/index/scan.rs (+3)
+
+● Check compilation
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --no-default-features --features pg18
+  2>&1 | tail -5
+  └ 6 lines...
+
+Not available in pgrx bindings. Let me check how to call it:
+
+● Check how reference projects handle index scan stats
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -r "pgstat_count_index_scan"
+  references/paradedb references/postgresml references/plrust 2>/dev/null | head -5
+  └ 1 line...
+
+● Search for pgstat function in pgrx bindings
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -r "pgstat_count_index_scan"
+  target/debug/build/pgrx-pg-sys-*/out/pg18.rs 2>/dev/null | head -5
+  └ 1 line...
+
+Not in pgrx bindings. It's a macro in PostgreSQL:
+
+● Find pgstat definition in PG source
+  $ grep -rn "pgstat_count_index_scan" ~/.pgrx/18.2/src/include/ 2>/dev/null | head -10
+  └ 3 lines...
+
+● Read pgstat macro definition
+  $ grep -A5 "pgstat_count_index_scan" ~/.pgrx/18.2/src/include/pgstat.h
+  └ 7 lines...
+
+● Check pgstat_should_count_relation
+  $ grep -A3 "pgstat_should_count_relation" ~/.pgrx/18.2/src/include/pgstat.h | head -5
+  └ 6 lines...
+
+I need to implement this as raw pointer operations since it's a macro:
+
+● Check pgrx bindings for pgstat types
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -r
+  "pgstat_info\|pgstat_assoc_relation\|PgStat_TableStatus\|numscans"
+  target/debug/build/pgrx-pg-sys-*/out/pg18.rs 2>/dev/null | head -15
+  └ 16 lines...
+
+Good, `pgstat_info`, `pgstat_assoc_relation`, and `numscans` are all available. Let me also check if `pgstat_enabled` is in the RelationData:
+
+● Check pgstat_enabled field
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep "pgstat_enabled"
+  target/debug/build/pgrx-pg-sys-09599dc749172009/out/pg18.rs | head -3
+  └ 2 lines...
+
+Now let me implement the macro inline:
+
+● Edit src/index/scan.rs (+12 -2)
+
+● Check compilation
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --no-default-features --features pg18
+  2>&1 | tail -5
+  └ 3 lines...
+
+Good. Now let me run all pgrx tests again:
+
+● Run pgrx tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | tail -10
+  └ 10 lines...
+
+● Get test result summary
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | grep "test result:"
+  └ 4 lines...
+
+All 90 tests pass. Now let me install the release build and run TAP tests:
+
+● Install release build
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx install --release --pg-config
+  ~/.pgrx/18.2/pgrx-install/bin/pg_config 2>&1 | tail -3
+  └ 4 lines...
+
+Let me run the critical TAP tests:
+
+● Run inserts test with fix
+  $ cd /Users/maropu/Repositories/pgvector-rx/tests/t && rm -rf tmp_check 2>/dev/null; cd
+  /Users/maropu/Repositories/pgvector-rx && bash tests/run_tap_tests.sh 016_hnsw_inserts >
+  /tmp/tap_016.log 2>&1; echo "EXIT: $?"; grep -E "(Result|Failed|not ok|#.*got|#.*expected)"
+  /tmp/tap_016.log
+  └ 18 lines...
+
+The idx_scan stat issue is fixed (test 85 passes now). The remaining failures are intermittent concurrent insert issues where 8 or 9 results are found instead of 10. This is expected behavior for concurrent HNSW operations - even the C code's test comment says "Elements may lose all incoming connections with the HNSW algorithm". Let me run it again to see if these are intermittent:
+
+● Rerun inserts test for intermittency check
+  $ cd /Users/maropu/Repositories/pgvector-rx/tests/t && rm -rf tmp_check 2>/dev/null; cd
+  /Users/maropu/Repositories/pgvector-rx && bash tests/run_tap_tests.sh 016_hnsw_inserts >
+  /tmp/tap_016b.log 2>&1; echo "EXIT: $?"; grep -E "(Result|Failed|not ok|#.*got|#.*expected)"
+  /tmp/tap_016b.log
+  └ 30 lines...
+
+Hmm, the test 85 (idx_scan) now passes, but we're still getting concurrent insert count failures. The problem is with 10 concurrent inserts to a fresh HNSW index, some elements can't be found. This is a concurrency issue.
+
+Let me think about this more carefully. The test does:
+1. 10 concurrent clients each insert 1 row (via pgbench)
+2. TRUNCATE and repeat 20 times
+3. Each time, expects all 10 rows to be found by the HNSW index
+
+The issue is that with only 10 elements, some elements may not be connected to others through the graph. Let me compare how the C code handles this vs our implementation. The C code passes this test consistently.
+
+Let me look more carefully at the entry point handling in our insert:
+
+● Read src/index/insert.rs lines 780-850
+  └ 71 lines read
+
+Let me now check our aminsert more carefully against the C code. The C code re-reads the entry point after upgrading to exclusive lock:
+
+● Read src/index/insert.rs lines 920-1000
+  └ 81 lines read
+
+● Read src/index/insert.rs lines 1000-1100
+  └ 100 lines read
+
+I see a critical issue! When we upgrade to exclusive lock (line 1034-1038), we DON'T re-read the meta page info. The C code does:
+
+```c
+/* Get latest entry point after lock is acquired */
+entryPoint = HnswGetEntryPoint(index);
+```
+
+But our code uses the stale `entry_blkno`, `entry_offno`, `entry_level` from before the lock upgrade. When another concurrent insert has already set a new entry point, we might miss it and insert without connecting to the graph properly.
+
+Let me fix this:
+
+● Edit src/index/insert.rs (+7)
+
+Now I also need to make `entry_blkno`, `entry_offno`, `entry_level` mutable:
+
+● Read src/index/insert.rs lines 1025-1042
+  └ 18 lines read
+
+● Edit src/index/insert.rs (+2 -1)
+
+● Check compilation
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --no-default-features --features pg18
+  2>&1 | tail -5
+  └ 3 lines...
+
+Good. Let me also look at duplicate detection - the C code has `FindDuplicateOnDisk` which is called before adding an element. Our code doesn't implement this. While not directly related to the concurrent insert issue, let me check if it matters for the test.
+
+Looking at the test again: it inserts 10 random vectors (via pgbench), so there shouldn't be duplicates. The issue is purely about graph connectivity during concurrent inserts.
+
+Let me think about what else could cause the issue. Looking at the C code flow in `HnswInsertTupleOnDisk`:
+
+1. Lock (shared)
+2. Get meta page info  
+3. Create element
+4. Maybe upgrade to exclusive lock, re-read entry point
+5. `HnswFindElementNeighbors` - finds neighbors
+6. `UpdateGraphOnDisk` - writes element + updates neighbors
+7. Unlock
+
+Our flow:
+1. Lock (shared)
+2. Get meta page info
+3. Maybe upgrade to exclusive lock, re-read entry point (NOW fixed)
+4. Find neighbors
+5. Write element to disk
+6. Update neighbors
+7. Update meta page
+8. Unlock
+
+The key difference is that in the C code, `HnswFindElementNeighbors` uses in-memory representation, so the element can find neighbors from newly inserted (but not yet committed) elements' graph connections. But our on-disk search reads committed data from buffers.
+
+Wait, actually the C code also does on-disk search when `building == false` (which is the case for inserts). Let me re-check...
+
+Actually, looking more carefully at the C code, `HnswFindElementNeighbors` with `base == NULL` (on-disk mode) calls `HnswSearchLayer` which is the same disk-based search. So the search is equivalent.
+
+The remaining issue is likely a race condition in how concurrent inserts interact with the graph. With 10 concurrent inserts into an initially empty index, the first insert creates the entry point, then others search from it. But if multiple inserts are happening simultaneously, some may not be connected because:
+
+1. Element A writes itself and its neighbors
+2. Element B searches but doesn't see Element A yet (different transaction/snapshot)
+
+Actually, the HNSW operations use buffer-level locking, not MVCC, so all concurrent inserts should see each other's writes to the buffers.
+
+Let me now run the tests again to see if the entry point fix helps:
+
+● Run pgrx tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | grep "test result:"
+  └ 4 lines...
+
+● Install release build
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx install --release --pg-config
+  ~/.pgrx/18.2/pgrx-install/bin/pg_config 2>&1 | tail -3
+  └ 4 lines...
+
+● Run inserts test again
+  $ cd /Users/maropu/Repositories/pgvector-rx/tests/t && rm -rf tmp_check 2>/dev/null; cd
+  /Users/maropu/Repositories/pgvector-rx && bash tests/run_tap_tests.sh 016_hnsw_inserts >
+  /tmp/tap_016c.log 2>&1; echo "EXIT: $?"; grep -E "(Result|Failed|not ok|#.*got|#.*expected)"
+  /tmp/tap_016c.log
+  └ 3 lines...
+
+The inserts test PASSES now! Let me run it a couple more times to verify it's not just lucky:
+
+● Rerun inserts test for stability
+  $ cd /Users/maropu/Repositories/pgvector-rx/tests/t && rm -rf tmp_check 2>/dev/null; cd
+  /Users/maropu/Repositories/pgvector-rx && bash tests/run_tap_tests.sh 016_hnsw_inserts >
+  /tmp/tap_016d.log 2>&1; echo "EXIT: $?"; grep -E "(Result|Failed)" /tmp/tap_016d.log
+  └ 3 lines...
+
+Excellent! Let me now run all the vector-related TAP tests to make sure everything passes:
+
+● Run all passing TAP tests
+  $ cd /Users/maropu/Repositories/pgvector-rx/tests/t && rm -rf tmp_check 2>/dev/null; cd
+  /Users/maropu/Repositories/pgvector-rx && for test in 010_hnsw_wal
+  012_hnsw_vector_build_recall 013_hnsw_vector_insert_recall 014_hnsw_vector_vacuum_recall
+  039_hnsw_cost 043_hnsw_iterative_scan 044_hnsw_iterative_scan_recall; do echo "=== $test ===";
+   rm -rf tests/t/tmp_check 2>/dev/null; bash tests/run_tap_tests.sh $test 2>&1 | grep -E ...
+  └ 11 lines...
+
+● read_bash
+  └ === 010_hnsw_wal ===
+
+● read_bash
+  └ === 010_hnsw_wal ===
+
+All 7 previously-passing tests continue to pass, plus the insert recall and inserts tests now pass too. Let me also check the other TAP tests that had known issues:
+
+● Run previously-failing TAP tests
+  $ cd /Users/maropu/Repositories/pgvector-rx/tests/t && rm -rf tmp_check 2>/dev/null; cd
+  /Users/maropu/Repositories/pgvector-rx && for test in 011_hnsw_vacuum 015_hnsw_vector_duplicates
+  016_hnsw_inserts 017_hnsw_filtering; do echo "=== $test ==="; rm -rf tests/t/tmp_check
+  2>/dev/null; bash tests/run_tap_tests.sh $test 2>&1 | grep -E "(Result|Failed|not ok)" | head -5;
+  done
+  └ 21 lines...
+
+016 passes now! The other failures (011, 015, 017) are pre-existing known issues:
+- 011: vacuum space reuse (expected)
+- 015: ef_search=1 duplicates (expected)
+- 017: cost estimation for selective filters (expected)
+
+Now let me run the code formatting and linting:
+
+● Format and lint
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo fmt && cargo clippy --no-default-features
+  --features pg18 2>&1 | tail -20
+  └ 3 lines...
+
+Clean build with no warnings. Let me do a final verification with all pgrx tests:
+
+● Final pgrx test run
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | grep "test result:"
+  └ 4 lines...
+
+All 90 tests pass. Let me now commit and push:
+
+● Check changed files
+  $ cd /Users/maropu/Repositories/pgvector-rx && git --no-pager diff --stat
+  └ 4 lines...
+
+Let me check the line count of actual implementation (not counting comments/blanks):
+
+● Count implementation lines
+  $ cd /Users/maropu/Repositories/pgvector-rx && git diff | grep '^+' | grep -v '^+++' | grep -v
+  '^\+\s*$' | grep -v '^\+\s*//' | wc -l
+  └ 2 lines...
+
+276 lines of actual implementation code - within the target range. Let me commit:
+
+● Commit changes
+  $ cd /Users/maropu/Repositories/pgvector-rx && git add -A && git commit -m "[#8] Fix concurrent
+  insert recall with neighbor selection heuristic
+
+  Implement proper back-connection update logic for HNSW insert:
+  - When all neighbor slots are full, run the neighbor selection...
+  └ 20 lines...
+
+● Push to remote
+  $ cd /Users/maropu/Repositories/pgvector-rx && git push origin master
+  └ 10 lines...
+
+Now let me wait for CI and verify:
+
+● Check CI status
+  $ sleep 30 && cd /Users/maropu/Repositories/pgvector-rx && gh run list --limit 1
+  └ 3 lines...
+
+● Watch CI progress
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh run watch 22020383318 2>&1 | tail -10
+  └ 1 line...
+
+● read_bash
+  └ ✓ Cache Rust dependencies
+
+CI passes. Let me verify:
+
+● Verify CI status
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh run list --limit 1
+  └ 3 lines...
+
+CI is green. Now let me update the issue:
+
+● Update issue with progress
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh issue comment 8 -b "### Progress Update -
+  Concurrent Insert Fix & pgstat
+
+  Completed in commit 4b0de3e:...
+  └ 30 lines...
+
+Now let me store some useful memories for future tasks:
+
+● store_memory
+  └ Memory stored successfully.
+
+● store_memory
+  └ Memory stored successfully.
+
+● store_memory
+  └ Memory stored successfully.
+
+● Verify clean working tree
+  $ cd /Users/maropu/Repositories/pgvector-rx && git --no-pager status
+  └ 5 lines...
+
+
+Total usage est:        3 Premium requests
+API time spent:         10m 59.626s
+Total session time:     38m 30.349s
+Total code changes:     +432 -26
+Breakdown by AI model:
+ claude-opus-4.6         10.1m in, 30.7k out, 10.0m cached (Est. 3 Premium requests)

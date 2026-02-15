@@ -1,0 +1,1182 @@
+
+
+I'll start by orienting myself - checking the repository state, open issues, and current build status.
+
+● Check git status and recent commits
+  $ cd /Users/maropu/Repositories/pgvector-rx && git status && echo "---" && git log --oneline -10
+  └ 16 lines...
+
+● List open GitHub issues
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh issue list --state open --limit 30 2>/dev/null
+  └ 11 lines...
+
+● Check recent CI runs
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh run list --limit 5 2>/dev/null
+  └ 7 lines...
+
+All CI is green. Let me check the current test status and what's still failing.
+
+● List TAP test files
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls tests/t/*.pl 2>/dev/null | sort
+  └ 12 lines...
+
+● List SQL test files
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls tests/sql/*.sql 2>/dev/null | sort
+  └ 1 line...
+
+● View Phase 7 issue details
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh issue view 8 2>/dev/null | head -80
+  └ 80 lines...
+
+I see 11 TAP tests exist out of 24 needed. According to memories, all 11 existing vector-only TAP tests pass (198/198 assertions). The remaining 13 TAP tests need halfvec, bit, and sparsevec types. Let me check what types are currently implemented and what reference tests look like.
+
+● Check implemented types
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls src/types/
+  └ 2 lines...
+
+● List all reference TAP tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls references/pgvector/test/t/*.pl | sort
+  └ 45 lines...
+
+● List reference SQL tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls references/pgvector/test/sql/hnsw*.sql
+  2>/dev/null
+  └ 3 lines...
+
+Currently only the `vector` type is implemented. The next big step is implementing `halfvec`, `bit`, and `sparsevec` types to enable the remaining 13 TAP tests. Let me look at what the halfvec type entails in the C reference and what operator classes are needed.
+
+● Explore: Explore type implementations
+  ● Read src/types/vector.rs lines 600-800
+    └ 200 lines read
+  ● Read src/types/vector.rs lines 800-1000
+    └ 201 lines read
+
+● Check current vector.rs size
+  $ cd /Users/maropu/Repositories/pgvector-rx && wc -l src/types/vector.rs
+  └ 2 lines...
+
+● Check halfvec reference code size
+  $ cd /Users/maropu/Repositories/pgvector-rx && wc -l references/pgvector/src/halfvec.c
+  references/pgvector/src/halfvec.h 2>/dev/null
+  └ 4 lines...
+
+● Check bitvec reference code size
+  $ cd /Users/maropu/Repositories/pgvector-rx && wc -l references/pgvector/src/bitvec.c
+  references/pgvector/src/bitvec.h 2>/dev/null
+  └ 4 lines...
+
+● Check sparsevec reference code size
+  $ cd /Users/maropu/Repositories/pgvector-rx && wc -l references/pgvector/src/sparsevec.c
+  references/pgvector/src/sparsevec.h 2>/dev/null
+  └ 4 lines...
+
+Each new type is substantial. Let me check what the halfvec TAP test actually needs — it's likely the smallest incremental step. Let me look at the test to understand what functions/operators are needed.
+
+● View halfvec build recall test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat
+  references/pgvector/test/t/024_hnsw_halfvec_build_recall.pl
+  └ 133 lines...
+
+● View bit build recall test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat
+  references/pgvector/test/t/020_hnsw_bit_build_recall.pl
+  └ 138 lines...
+
+Both tests expect parallel build support (which is out of scope) - they check for parallel workers and disk-based builds. Let me see what the test modifications look like in the already-ported tests:
+
+● See how existing tests were adapted
+  $ cd /Users/maropu/Repositories/pgvector-rx && head -30 tests/t/012_hnsw_vector_build_recall.pl
+  └ 31 lines...
+
+● See differences from original
+  $ cd /Users/maropu/Repositories/pgvector-rx && diff
+  references/pgvector/test/t/012_hnsw_vector_build_recall.pl tests/t/012_hnsw_vector_build_recall.pl
+   2>/dev/null
+  └ 39 lines...
+
+Good - the adaptation is simple: change `CREATE EXTENSION vector` to `CREATE EXTENSION pgvector_rx` and remove parallel build tests. Now I need to decide what to work on. The biggest gap is the missing types (halfvec, bit, sparsevec). Let me check what's needed most immediately.
+
+Let me look at the `bit` type since it might be simpler (only 77 lines of C reference code), and it uses PostgreSQL's built-in `bit` type.
+
+● View bitvec C implementation
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat references/pgvector/src/bitvec.c
+  └ 70 lines...
+
+● View bitvec C header
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat references/pgvector/src/bitvec.h
+  └ 9 lines...
+
+● Find bit-related SQL definitions
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  'hamming\|jaccard\|bit_hamming\|bit_jaccard\|bitvec\|<~>\|<%>' references/pgvector/sql/vector.sql
+  | head -60
+  └ 19 lines...
+
+● View bitutils header
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat references/pgvector/src/bitutils.h
+  └ 17 lines...
+
+● View bitutils C implementation
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat references/pgvector/src/bitutils.c
+  └ 223 lines...
+
+Now let me understand how the HNSW index handles different vector types - I need to see the support functions and how they're registered.
+
+● Find how build handles vector types
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  'HNSW_TYPE_\|HnswType\|VECTOR_TYPE\|proc_oid\|support_fn\|get_proc\|FmgrInfo\|fmgr_info'
+  src/index/build.rs | head -30
+  └ 6 lines...
+
+● Find how scan handles distance functions
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  'distance\|compute_distance\|distance_fn\|dist_func\|procnum\|support\|normprocinfo'
+  src/index/scan.rs | head -40
+  └ 39 lines...
+
+● Find type-related HNSW definitions
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  'HNSW_MAX_DIM\|PROC_DISTANCE\|hnswProcInfo\|support\|opclass\|bit_hamming\|bit_jaccard\|halfvec\|s
+  parsevec\|DIST_TYPE\|DistanceType\|distance_type' src/types/hnsw.rs | head -40
+  └ 2 lines...
+
+● Find support function handling
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  'support\|PROCNUM\|normprocinfo\|NormProcInfo\|NORM\|hnsw_support\|amproc\|FUNCTION 3\|FUNCTION 4'
+   src/index/scan.rs | head -30
+  └ 5 lines...
+
+● Find support function handling in build
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  'PROCNUM\|normprocinfo\|NormProcInfo\|NORM\|hnsw_support\|amproc\|FUNCTION [2-4]'
+  src/index/build.rs | head -30
+  └ 6 lines...
+
+Let me look deeper at how types/operators are registered and how the HNSW index resolves the distance function for different operator classes.
+
+● Find HNSW proc constants
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  'HNSW_DISTANCE_PROC\|HNSW_NORM_PROC\|HNSW.*PROC' src/types/hnsw.rs src/index/*.rs 2>/dev/null
+  └ 11 lines...
+
+● Check SQL definitions
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'OPERATOR\|CREATE OPERATOR\|CREATE
+  FUNCTION\|OPERATOR CLASS' sql/*.sql 2>/dev/null | head -30
+  └ 1 line...
+
+● Check SQL directory
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls sql/
+  └ 1 line...
+
+● Find proc constants definition
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'HNSW_DISTANCE_PROC\|HNSW_NORM_PROC'
+  src/types/hnsw.rs src/lib.rs src/types/mod.rs 2>/dev/null
+  └ 1 line...
+
+● Find proc constants across all src
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn 'HNSW_DISTANCE_PROC\|HNSW_NORM_PROC' src/
+  | head -20
+  └ 13 lines...
+
+Now let me understand the full picture of how operator classes are defined. The HNSW index uses `index_getprocinfo` to get the distance function (proc 1) and norm function (proc 2) from the operator class. The operator classes are defined in SQL via `CREATE OPERATOR CLASS`. Let me check where these are currently defined.
+
+● Find operator class definitions in vector.rs
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'OPERATOR CLASS\|CREATE OPERATOR\|CREATE
+  FUNCTION.*distance\|hamming\|jaccard\|halfvec\|sparsevec\|bit_hamming\|bit_jaccard'
+  src/types/vector.rs | head -40
+  └ 13 lines...
+
+● Read src/types/vector.rs lines 830-870
+  └ 40 lines read
+
+Now I understand the architecture. To add bit vector support, I need to:
+
+1. Create `hamming_distance(bit, bit)` and `jaccard_distance(bit, bit)` SQL functions
+2. Create `<~>` and `<%>` operators
+3. Create `bit_hamming_ops` and `bit_jaccard_ops` HNSW operator classes
+4. Port the TAP tests (020-023)
+
+The bit type is already built into PostgreSQL, so I don't need to create a new type. I just need distance functions and operators. This is the smallest increment to add a new type. Let me plan this.
+
+● Create ~/.copilot/session-state/f9ff10ac-e633-44cc-8367-d4f1e14039e8/plan.md (+24)
+
+Now let me study the existing vector.rs pattern more carefully and the C reference to implement the bit vector support.
+
+● Read src/types/vector.rs lines 1-50
+  └ 50 lines read
+
+● Read src/lib.rs lines 1-30
+  └ 30 lines read
+
+● Read src/types/mod.rs
+  └ 4 lines read
+
+● Read src/types/vector.rs lines 770-870
+  └ 100 lines read
+
+Now let me look at how the distance functions are implemented in Rust to follow the same pattern:
+
+● Read src/types/vector.rs lines 50-200
+  └ 150 lines read
+
+Now let me look at the distance function implementations:
+
+● Find distance function locations
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'fn l2_distance\|fn inner_product\|fn
+  cosine_distance\|fn l1_distance\|fn vector_l2_squared\|fn vector_negative_inner\|fn
+  vector_norm\|fn l2_normalize' src/types/vector.rs
+  └ 10 lines...
+
+● Read src/types/vector.rs lines 580-700
+  └ 121 lines read
+
+I now have a clear understanding of the pattern. Let me also check how `VarBit` is available in pgrx:
+
+● Search for VarBit in pgrx bindings
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn
+  'VarBit\|varbit\|VARBITLEN\|VARBITS\|VARBITBYTES' target/pgrx-install/ 2>/dev/null | head -10;
+  echo "---"; grep -rn 'VarBit' target/release/build/pgrx-*/out/*.rs 2>/dev/null | head -10
+  └ 2 lines...
+
+● Find VarBit type in build output
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn 'pub struct VarBit\|pub type
+  VarBit\|struct VarBit' target/release/build/ 2>/dev/null | head -10
+  └ 1 line...
+
+● Find pgrx-pg-sys generated bindings
+  $ cd /Users/maropu/Repositories/pgvector-rx && find target -name "*.rs" -path "*/pgrx-pg-sys*"
+  2>/dev/null | head -5
+  └ 6 lines...
+
+● Search pgrx installation for VarBit
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn 'VarBit' ~/.pgrx/ 2>/dev/null | head -10
+  └ 11 lines...
+
+● Check pgrx bindings for VarBit
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  'VarBit\|varbit\|VARBITLEN\|VARBITBYTES\|VARBITS'
+  target/release/build/pgrx-pg-sys-b42551d7bf7b23d4/out/pg18.rs 2>/dev/null | head -20
+  └ 9 lines...
+
+● Check for VarBit struct in bindings
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'struct
+  VarBit\|VARBITLEN\|VARBITS\|VARBITBYTES\|VARBITTOTALLEN\|VarBit'
+  target/release/build/pgrx-pg-sys-b42551d7bf7b23d4/out/pg18.rs 2>/dev/null | head -20
+  └ 1 line...
+
+VarBit struct is not in the pgrx bindings. Let me check what the actual C struct looks like and define it manually.
+
+● View VarBit header definition
+  $ cat ~/.pgrx/18.2/pgrx-install/include/postgresql/server/utils/varbit.h
+  └ 90 lines...
+
+Now I understand. VarBit is: `vl_len_(i32) + bit_len(i32) + bit_dat[]`. The standard varlena header means we can detoast it. Let me check `pg_number_of_ones` availability:
+
+● Check popcount availability in pgrx
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'pg_number_of_ones\|pg_popcount\|popcount'
+  target/release/build/pgrx-pg-sys-b42551d7bf7b23d4/out/pg18.rs 2>/dev/null | head -20
+  └ 13 lines...
+
+`pg_number_of_ones` is available. Now I have everything I need. Let me create the bitvec module:
+
+● Create src/types/bitvec.rs (+325)
+
+Now add the module to `mod.rs`:
+
+● Edit src/types/mod.rs (+1)
+
+Now let me check the VarBit data layout more carefully. The `VARSIZE_ANY_EXHDR` macro gets the size excluding the varlena header. Let me verify my understanding:
+
+● Check VARSIZE availability
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'VARSIZE_ANY_EXHDR\|VARSIZE\b'
+  target/release/build/pgrx-pg-sys-b42551d7bf7b23d4/out/pg18.rs 2>/dev/null | head -10
+  └ 1 line...
+
+● Check varlena functions in bindings
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn 'VARSIZE\|varsize\|varlena'
+  target/release/build/pgrx-pg-sys-b42551d7bf7b23d4/out/pg18.rs 2>/dev/null | head -20
+  └ 19 lines...
+
+`VARSIZE_ANY_EXHDR` is a C macro and won't be directly available. Let me check how the existing vector.rs handles this:
+
+● Check how vector.rs handles varlena sizes
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'VARSIZE\|vl_len_\|SET_VARSIZE\|varsize'
+  src/types/vector.rs | head -20
+  └ 4 lines...
+
+Right - the vl_len_ is a 4-byte header and `SET_VARSIZE` sets `(size << 2)`. For VarBit, the structure after detoasting is:
+- `vl_len_` (4 bytes) - varlena header encoding the total size
+- `bit_len` (4 bytes) - number of valid bits
+- `bit_dat[]` - the actual bit data
+
+The total stored size (VARSIZE) = vl_len_ >> 2 (for 4-byte headers). VARHDRSZ = 4. VARBITHDRSZ = 4 (the bit_len field). So data bytes = VARSIZE - VARHDRSZ - VARBITHDRSZ = total_size - 8.
+
+Let me fix my varbit_bytes and varbit_data functions:
+
+● Edit src/types/bitvec.rs (+18 -8)
+
+Now let's also remove the unused import and try building:
+
+● Check compilation
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check 2>&1 | head -40
+  └ 28 lines...
+
+● Try with pg18 feature
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --features pg18 2>&1 | head -30
+  └ 30 lines...
+
+● Try with pg18 only
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --no-default-features --features pg18
+  2>&1 | tail -20
+  └ 3 lines...
+
+It compiles. Now let me run the tests:
+
+● Run pgrx tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | tail -40
+  └ 41 lines...
+
+There are failures. Let me see which ones:
+
+● Check test failures
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | grep
+  'FAILED\|panicked\|test result' | head -50
+  └ 51 lines...
+
+These look like installation issues - the extension wasn't re-installed before testing. Let me check - many pre-existing tests are failing too, which suggests the extension needs to be reinstalled:
+
+● Check specific bitvec test failure details
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | grep -A2
+  'pg_test_hamming_distance '  | head -10
+  └ 4 lines...
+
+Hamming tests pass! Let me see the Jaccard failure details:
+
+● Check Jaccard test failure
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | grep -B2 -A5
+  'pg_test_jaccard_distance\b' | head -20
+  └ 21 lines...
+
+Connection closed means the backend crashed. This is likely a segfault in the Jaccard distance function. Let me look at the issue - it might be in the bit data access. Let me check if there's a problem with how I'm reading the bits. The issue could be that `pg_number_of_ones` is accessed incorrectly.
+
+● Check pg_number_of_ones type
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'pg_number_of_ones'
+  target/release/build/pgrx-pg-sys-b42551d7bf7b23d4/out/pg18.rs 2>/dev/null
+  └ 2 lines...
+
+The type is `uint8` which maps to `u8`. And I'm indexing it with a `u8` cast to `usize`, which should be fine. The hamming distance works fine with the same access pattern, so the issue might be elsewhere.
+
+Wait, let me re-examine. Hamming test works, Jaccard fails with a crash. Let me check if the issue is in the Jaccard computation - perhaps an integer overflow or division by zero edge case. But actually the crash suggests a memory access issue.
+
+Let me check - maybe the issue is that the test code uses `'11000000'::bit(8)` which has only 1 byte. Let me verify by looking at what the Jaccard function does differently. Actually, wait - the hamming function uses the same `varbit_bytes` and `varbit_data` functions. So the layout access is fine.
+
+Let me check if `<%>` operator creation might conflict. The `%` sign needs escaping in SQL.
+
+● Check original SQL for <%> operator
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n '<%>' references/pgvector/sql/vector.sql |
+  head -5
+  └ 4 lines...
+
+The original C code uses `<%>` too. Let me try running just the hamming and jaccard tests more carefully. The `connection closed` error strongly suggests a backend crash. Let me look at my jaccard test SQL more carefully:
+
+The test SQL is: `SELECT jaccard_distance('11000000'::bit(8), '10100000'::bit(8))`
+
+Actually, wait - the problem might be that with only 1 data byte, the jaccard function loops once and that's fine. But what if the other tests cause accumulated state issues? Let me re-run just the bitvec tests:
+
+● Run just the jaccard test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 pg_test_jaccard_distance 2>&1
+  | tail -30
+  └ 30 lines...
+
+All jaccard tests pass when run individually. The failures I saw earlier were likely due to parallel test execution conflicts (pgrx tests use a shared database). Let me run all tests to see:
+
+● Run all tests and check results
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | grep -E 'FAILED|test
+  result' | tail -5
+  └ 6 lines...
+
+39 failures. Let me check if this is a pre-existing issue by reverting my changes and running:
+
+● Test without my changes
+  $ cd /Users/maropu/Repositories/pgvector-rx && git stash && cargo pgrx test pg18 2>&1 | grep -E
+  'FAILED|test result' | tail -5
+  └ 5 lines...
+
+All 90 tests pass without my changes! So my changes introduced regressions. Let me restore and investigate:
+
+● Restore changes
+  $ cd /Users/maropu/Repositories/pgvector-rx && git stash pop
+  └ 15 lines...
+
+The issue is that adding the bitvec module with SQL extensions causes some conflict. It's likely the `extension_sql!` ordering or a CREATE EXTENSION failure due to the new SQL. Let me run the tests and capture the actual error:
+
+● Check specific failure details
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | grep -B1 -A5
+  'pg_test_vector_type_exists' | head -15
+  └ 16 lines...
+
+"Error connecting to Postgres" - this means the PostgreSQL backend crashed during test execution. The issue is likely that the SQL for the extension has a problem. Let me check the generated SQL:
+
+● Generate schema and check for errors
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx schema pg18 2>&1 | tail -5
+  └ 5 lines...
+
+● Check schema generation for errors
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx schema pg18 2>&1 | grep -i
+  'error\|warning\|failed' | head -10
+  └ 1 line...
+
+No errors in schema generation. Let me try installing the extension manually and creating it to see the actual error:
+
+● Install the extension
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx install --pg-config
+  ~/.pgrx/18.2/pgrx-install/bin/pg_config 2>&1 | tail -10
+  └ 11 lines...
+
+Wait - only 7 SQL entities? That seems low. It should be many more with pg_test feature. Let me check the SQL file:
+
+● Check for bitvec SQL in installed extension
+  $ cat ~/.pgrx/18.2/pgrx-install/share/postgresql/extension/pgvector_rx--0.0.0.sql | grep -i
+  'bit_hamming\|bit_jaccard\|hamming_distance\|jaccard_distance' | head -10
+  └ 9 lines...
+
+Good - the SQL is there. Let me start a test instance and try to create the extension:
+
+● Start pgrx test instance
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx run pg18 2>&1 &
+  sleep 5
+  echo "done waiting"
+  └ 1 line...
+
+● read_bash
+  └ [1] 1040
+
+Let me try a different approach - directly use psql:
+
+● Try creating extension
+  $ ~/.pgrx/18.2/pgrx-install/bin/psql -p 28818 -d pgvector_rx -c "DROP EXTENSION IF EXISTS
+  pgvector_rx CASCADE; CREATE EXTENSION pgvector_rx;" 2>&1
+  └ 3 lines...
+
+● Check PG status
+  $ ~/.pgrx/18.2/pgrx-install/bin/pg_ctl -D ~/.pgrx/data-18 status 2>&1
+  └ 3 lines...
+
+● Create extension via psql
+  $ ~/.pgrx/18.2/pgrx-install/bin/psql -h /Users/maropu/.pgrx -p 28818 -d pgvector_rx -c "DROP
+  EXTENSION IF EXISTS pgvector_rx CASCADE; CREATE EXTENSION pgvector_rx;" 2>&1
+  └ 3 lines...
+
+Extension creates fine. Let me test the distance functions:
+
+● Test hamming distance
+  $ ~/.pgrx/18.2/pgrx-install/bin/psql -h /Users/maropu/.pgrx -p 28818 -d pgvector_rx -c "SELECT
+  hamming_distance('10101010'::bit(8), '10100000'::bit(8));" 2>&1
+  └ 5 lines...
+
+● Test jaccard distance
+  $ ~/.pgrx/18.2/pgrx-install/bin/psql -h /Users/maropu/.pgrx -p 28818 -d pgvector_rx -c "SELECT
+  jaccard_distance('11000000'::bit(8), '10100000'::bit(8));" 2>&1
+  └ 5 lines...
+
+● Test HNSW index with bit hamming
+  $ ~/.pgrx/18.2/pgrx-install/bin/psql -h /Users/maropu/.pgrx -p 28818 -d pgvector_rx -c "
+  CREATE TABLE test_bit (id serial, v bit(8));
+  INSERT INTO test_bit (v) VALUES ('10101010'), ('11001100'), ('11110000'), ('00001111');
+  CREATE INDEX ON test_bit USING hnsw (v bit_hamming_ops);
+  SET enable_seqscan = off;...
+  └ 7 lines...
+
+The server crashes when creating or querying the HNSW index with bit vectors! This is the real issue. The HNSW index code expects to work with our `VectorHeader` type, but bit vectors have a completely different layout. Let me investigate how the C pgvector handles this.
+
+● Check how C pgvector handles different types
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  'support\|SUPPORT\|HnswSupport\|hnsw_support\|FUNCTION
+  3\|normprocinfo\|typeinfo\|type_len\|typlen' references/pgvector/src/hnsw*.c | head -30
+  └ 31 lines...
+
+● Find type info structures
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  'HnswSupport\|typeInfo\|TypeInfo\|HnswTypeInfo\|GetTypeInfo' references/pgvector/src/hnsw.h | head
+   -30
+  └ 22 lines...
+
+● View HnswTypeInfo struct
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '/typedef struct
+  HnswTypeInfo/,/HnswTypeInfo;/p' references/pgvector/src/hnsw.h
+  └ 7 lines...
+
+● Find type info implementations
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  'HnswGetTypeInfo\|GetTypeInfo\|bitvecTypeInfo\|vectorTypeInfo\|halfvecTypeInfo\|sparsevecTypeInfo'
+   references/pgvector/src/hnsw*.c | head -20
+  └ 5 lines...
+
+● View HnswGetTypeInfo implementation
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '1350,1420p'
+  references/pgvector/src/hnswutils.c
+  └ 71 lines...
+
+Important! The C implementation has a `FUNCTION 3` (HNSW_TYPE_INFO_PROC) in operator classes that provides type-specific info. Let me check:
+
+● Check FUNCTION 3 in operator classes
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'FUNCTION 3'
+  references/pgvector/sql/vector.sql | head -10
+  └ 11 lines...
+
+● Check bit opclass definition in reference
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep 'bit_hamming\|bit_jaccard'
+  references/pgvector/sql/vector.sql
+  └ 4 lines...
+
+● Check full bit operator class definition
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -A10 'bit_hamming_ops'
+  references/pgvector/sql/vector.sql | head -20
+  └ 19 lines...
+
+The bit operator classes need a `FUNCTION 3 hnsw_bit_support(internal)` - this is the type info function. Let me check how the existing vector operator classes handle FUNCTION 3:
+
+● Check how build handles type info
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'HNSW_TYPE_INFO_PROC\|FUNCTION
+  3\|amsupport\|HnswTypeInfo\|type_info\|typeInfo\|max_dim\|maxDimensions\|check_value'
+  src/index/build.rs | head -20
+  └ 1 line...
+
+● Search for type info proc handling
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn
+  'TYPE_INFO\|type_info\|typeinfo\|amsupport\|maxDim\|max_dim\|support.*3' src/ | head -20
+  └ 3 lines...
+
+● Check where TYPE_INFO_PROC is used
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn 'HNSW_TYPE_INFO_PROC' src/ | head -10
+  └ 2 lines...
+
+So `HNSW_TYPE_INFO_PROC` is defined but never used in the Rust code yet! The handler says `amsupport = 3`, meaning PostgreSQL expects 3 support functions in operator classes. But the current vector operator classes only define FUNCTION 1 (distance) and optionally FUNCTION 2 (norm). 
+
+Now the issue is that when I create a bit HNSW index, the index building code tries to access the vector data assuming it's a `VectorHeader` format. Let me check exactly where it crashes:
+
+● Find VectorHeader usage in build.rs
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  'VectorHeader\|vector_data\|dim.*as.*i16\|VECTOR_HEADER\|vector_size' src/index/build.rs | head
+  -20
+  └ 3 lines...
+
+● Read src/index/build.rs lines 280-330
+  └ 50 lines read
+
+Here's the problem. Line 287-288: the code casts the detoasted datum to `*const VectorHeader` and accesses `(*vec_ptr).dim`. For a `bit` type, the structure is different - `bit_len` is at a different position (or rather at the same offset but represents something different). The `VectorHeader.dim` is at offset 4 (i16), while `VarBit.bit_len` is at offset 4 (i32). Reading dim as i16 from a VarBit would get the wrong value.
+
+This is a fundamental issue - the HNSW index code assumes all indexed values are `VectorHeader` format. To support bit vectors, I need to make the code type-agnostic. It should work with raw datums and use the distance function via FmgrInfo calls, without assuming the data layout.
+
+Let me look at how the C code handles this:
+
+● Check how C code handles type-agnostic values
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  'HnswFormIndexValue\|CheckDims\|dim\|typeInfo' references/pgvector/src/hnswutils.c | head -30
+  └ 15 lines...
+
+● View HnswFormIndexValue function
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '395,420p'
+  references/pgvector/src/hnswutils.c
+  └ 26 lines...
+
+The C code treats values as opaque `Datum` pointers - it doesn't access the internal structure. The "dimensions" concept is handled differently:
+
+● Check how C code determines element size
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  'dimensions\|element_size\|datumSize\|VARSIZE\|tuple_len\|HnswPtrAccess'
+  references/pgvector/src/hnswbuild.c | head -20
+  └ 19 lines...
+
+Now I see the key insight: the C code uses `VARSIZE_ANY` to determine the data size, not `dim`. It treats indexed values as opaque varlena blobs. The `dimensions` come from the column's `typmod`, not from the vector header.
+
+Let me look at how the Rust code stores element data and uses dimensions:
+
+● Check dimension handling in build.rs
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  'dimensions\|dim\|VARSIZE\|varlena_size\|element_size\|vec_ptr.*dim\|VectorHeader'
+  src/index/build.rs | head -30
+  └ 24 lines...
+
+The core issue is lines 287-306. The code:
+1. Casts to `VectorHeader` and reads `dim` from it (wrong for bit types)
+2. Validates dimensions against `HNSW_MAX_DIM` (wrong limit for bit types)
+
+But importantly, the rest of the code (line 329 onwards) uses `VARSIZE` to determine the blob size, which IS type-agnostic. The dimension check on lines 291-306 is the main problem.
+
+Looking at C's approach, `dimensions` comes from `atttypmod` (column type modifier), not from the data itself. For `bit(52)`, the typmod would be 52. For `vector(3)`, the typmod would be 3.
+
+Let me look at where in C the typmod handling differs and how `HNSW_MAX_DIM` is validated per type:
+
+● View C ambuild type handling
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '660,695p'
+  references/pgvector/src/hnswbuild.c
+  └ 37 lines...
+
+The C code:
+1. Gets dimensions from `atttypmod` (the column's type modifier)
+2. Validates max dimensions using `typeInfo->maxDimensions`
+3. Never accesses the vector's internal dim field for validation
+
+Now I understand the full picture. The Rust code needs to be made type-agnostic. This is a significant refactoring. Let me check how many places in the Rust code access `VectorHeader` directly:
+
+● Find all VectorHeader usage in index code
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn
+  'VectorHeader\|vector_data\|vector_size\|l2_normalize_raw' src/index/ | head -30
+  └ 8 lines...
+
+Let me see the insert code:
+
+● Read src/index/insert.rs lines 1235-1300
+  └ 66 lines read
+
+Now let me see how the scan handles it:
+
+● Read src/index/scan.rs lines 720-740
+  └ 21 lines read
+
+The key issue is that `l2_normalize_raw` is vector-type-specific and is called from the scan path. But the norm_fmgr is only non-null when there's a FUNCTION 2 in the operator class, which is only for cosine distance. Bit vectors don't have a FUNCTION 2, so the normalize path won't be taken.
+
+The main problem for bit support is in build.rs and insert.rs where we cast to `VectorHeader` and read `dim`. Let me refactor these to be type-agnostic. The approach:
+
+1. Get dimensions from `atttypmod` (column type modifier) instead of from the data
+2. Don't cast to `VectorHeader` - just use the datum as an opaque varlena
+3. Use `VARSIZE` to determine the size of the stored value
+
+● Read src/index/build.rs lines 155-210
+  └ 56 lines read
+
+● Read src/index/build.rs lines 267-345
+  └ 79 lines read
+
+Now let me look at the `ambuild` function to see where it initializes `dimensions`:
+
+● Check ambuild dimension initialization
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'ambuild\|dimensions\|atttypmod\|typmod'
+  src/index/build.rs | head -20
+  └ 19 lines...
+
+● Read src/index/build.rs lines 697-770
+  └ 74 lines read
+
+Now I need to refactor the build_callback and ambuild to be type-agnostic. The key changes:
+
+1. In `ambuild`: Read dimensions from `atttypmod` instead of from data
+2. In `build_callback`: Don't cast to `VectorHeader` - just detoast and treat as opaque varlena
+3. Remove the VectorHeader import from build.rs
+
+Let me also check what validation is needed per the C code:
+
+● View C build callback
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '475,515p'
+  references/pgvector/src/hnswbuild.c
+  └ 42 lines...
+
+The C code doesn't validate individual tuple dimensions inside the callback at all! It just uses `VARSIZE_ANY` to get the size. Dimension validation is only done once at the beginning of `ambuild` via `atttypmod`. The `HnswFormIndexValue` function just detoasts, checks value (if checkValue is set), and normalizes if needed.
+
+Now let me implement the fix. I'll modify `build_callback` to not access `VectorHeader` directly and instead use opaque datum handling. And I'll add dimension validation in `ambuild` using `atttypmod`.
+
+● Read src/index/build.rs lines 1-20
+  └ 20 lines read
+
+Now let me make the changes. First, let me update the build code:
+
+● Edit src/index/build.rs (-1)
+
+Now replace the build_callback's type-specific dimension handling:
+
+● Edit src/index/build.rs (+5 -25)
+
+Now update the varlena size calculation that follows:
+
+● Read src/index/build.rs lines 300-340
+  └ 41 lines read
+
+● Edit src/index/build.rs (+2 -2)
+
+Now update `ambuild` to get dimensions from `atttypmod`:
+
+● Read src/index/build.rs lines 680-730
+  └ 51 lines read
+
+● Edit src/index/build.rs (+16)
+
+Now update insert.rs similarly:
+
+● Read src/index/insert.rs lines 18-25
+  └ 8 lines read
+
+● Edit src/index/insert.rs (-1)
+
+Now update the insert callback:
+
+● Read src/index/insert.rs lines 1226-1290
+  └ 65 lines read
+
+● Edit src/index/insert.rs (+10 -15)
+
+Now I need to update the part of insert.rs that writes the element to disk - it uses the varlena from `vec_ptr`:
+
+● Check remaining vec_ptr references in insert.rs
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'vec_ptr\|VectorHeader' src/index/insert.rs
+   | head -20
+  └ 2 lines...
+
+● Read src/index/insert.rs lines 1320-1340
+  └ 21 lines read
+
+● Edit src/index/insert.rs (+1 -1)
+
+Now let me also check the scan path for the normalize:
+
+● Read src/index/scan.rs lines 725-735
+  └ 10 lines read
+
+This is fine - the normalize function is only called when there's a norm function (FUNCTION 2), which only exists for cosine distance on vector type. Bit vectors won't have this.
+
+Now let me also check the vacuum code:
+
+● Check VectorHeader usage in vacuum
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'VectorHeader\|vec_ptr\|vector_data'
+  src/index/vacuum.rs | head -10
+  └ 1 line...
+
+Good, vacuum doesn't reference VectorHeader. Let me also check if VARBITOID is available in pgrx:
+
+● Check VARBITOID availability
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'VARBITOID'
+  target/release/build/pgrx-pg-sys-b42551d7bf7b23d4/out/pg18.rs 2>/dev/null | head -5
+  └ 2 lines...
+
+Good. Let me also check TupleDescAttr:
+
+● Check TupleDescAttr availability
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'TupleDescAttr'
+  target/release/build/pgrx-pg-sys-b42551d7bf7b23d4/out/pg18.rs 2>/dev/null | head -5
+  └ 3 lines...
+
+Now let me try building:
+
+● Check compilation
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --no-default-features --features pg18
+  2>&1 | tail -20
+  └ 3 lines...
+
+Compiles. Let me run the tests:
+
+● Run all tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | grep -E 'FAILED|test
+  result' | tail -5
+  └ 6 lines...
+
+Still 40 failures. This is likely still crashing from the HNSW index tests. Let me check the specific errors more carefully:
+
+● Run just the bit hamming HNSW test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 pg_test_bit_hamming_hnsw_index
+   2>&1 | tail -30
+  └ 31 lines...
+
+The backend crashes (signal 6 = SIGABRT) during the HNSW index test. The test creates an index and queries it. Let me debug by running just the SQL manually:
+
+● Stop any running PG instance
+  $ cd /Users/maropu/Repositories/pgvector-rx && ~/.pgrx/18.2/pgrx-install/bin/pg_ctl -D
+  ~/.pgrx/data-18 status 2>&1; ~/.pgrx/18.2/pgrx-install/bin/pg_ctl -D ~/.pgrx/data-18 stop 2>&1;
+  sleep 2; echo "stopped"
+  └ 6 lines...
+
+● Install extension
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx install --pg-config
+  ~/.pgrx/18.2/pgrx-install/bin/pg_config 2>&1 | tail -5
+  └ 6 lines...
+
+● Start PostgreSQL
+  $ ~/.pgrx/18.2/pgrx-install/bin/pg_ctl -D ~/.pgrx/data-18 -l /tmp/pg_test.log start -o "-p 28818
+  -c unix_socket_directories=/Users/maropu/.pgrx" 2>&1; sleep 2
+  └ 3 lines...
+
+● Recreate extension
+  $ ~/.pgrx/18.2/pgrx-install/bin/psql -h /Users/maropu/.pgrx -p 28818 -d pgvector_rx -c "DROP
+  EXTENSION IF EXISTS pgvector_rx CASCADE; CREATE EXTENSION pgvector_rx;" 2>&1
+  └ 3 lines...
+
+● Test HNSW index creation with bit vectors
+  $ ~/.pgrx/18.2/pgrx-install/bin/psql -h /Users/maropu/.pgrx -p 28818 -d pgvector_rx -c "
+  CREATE TABLE test_bit (id serial, v bit(8));
+  INSERT INTO test_bit (v) VALUES ('10101010'), ('11001100'), ('11110000'), ('00001111');
+  CREATE INDEX ON test_bit USING hnsw (v bit_hamming_ops);
+  " 2>&1
+  └ 5 lines...
+
+The crash is during CREATE INDEX. Let me check the log:
+
+● Check PG crash log
+  $ tail -30 /tmp/pg_test.log
+  └ 24 lines...
+
+"thread caused non-unwinding panic. aborting." - this is a Rust panic. Let me add more diagnostics. The issue might be in the `ambuild` code. Let me check if the `atttypmod` for bit(8) is 8:
+
+● Check atttypmod for bit type
+  $ ~/.pgrx/18.2/pgrx-install/bin/psql -h /Users/maropu/.pgrx -p 28818 -d pgvector_rx -c "SELECT
+  atttypmod FROM pg_attribute WHERE attrelid = 'test_bit'::regclass AND attname = 'v';" 2>&1
+  └ 4 lines...
+
+Table was dropped by the crash. Let me recreate it without the index:
+
+● Check atttypmod for bit(8)
+  $ ~/.pgrx/18.2/pgrx-install/bin/psql -h /Users/maropu/.pgrx -p 28818 -d pgvector_rx -c "
+  CREATE EXTENSION IF NOT EXISTS pgvector_rx;
+  CREATE TABLE test_bit (id serial, v bit(8));
+  SELECT atttypmod FROM pg_attribute WHERE attrelid = 'test_bit'::regclass AND attname = 'v';
+  " 2>&1
+  └ 8 lines...
+
+Good, `atttypmod` for `bit(8)` is 8. So `dimensions` will be 8, which is within bounds. The crash is happening somewhere else during the build. Let me think about what could go wrong...
+
+The crash log says "thread caused non-unwinding panic. aborting." - this is a Rust panic reaching the FFI boundary. The issue might be in our graph code or distance function call. Let me compile with better debug info and check the stack trace:
+
+● Run test with backtrace
+  $ cd /Users/maropu/Repositories/pgvector-rx && RUST_BACKTRACE=1 cargo pgrx test pg18
+  pg_test_bit_hamming_hnsw_index 2>&1 | tail -40
+  └ 41 lines...
+
+The backtrace shows only the test framework, not the actual crash location (which happened in the server process). Let me look at the PG log from the test run more carefully. The crash is "non-unwinding panic" - this typically happens when a panic occurs in an `extern "C"` function without `#[pg_guard]`. But we have `#[pg_guard]` on all our extern "C" functions.
+
+Let me look at what the build_callback accesses. The issue might be in how we call the distance function with bit type data. Let me trace through the logic:
+
+1. `build_callback` is called for each row
+2. The datum is detoasted
+3. The varlena is copied into the values arena
+4. During graph building, the distance function is called via `FunctionCall2Coll`
+
+Wait, let me check what `HnswBuildState::distance_fn` does:
+
+● Find distance_fn in build.rs
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'distance_fn\|fn distance'
+  src/index/build.rs | head -10
+  └ 4 lines...
+
+● Read src/index/build.rs lines 215-260
+  └ 46 lines read
+
+Here's the issue! The `distance_fn` passes raw pointers to the data stored in the `values` arena directly as Datum arguments to `FunctionCall2Coll`. The hamming_distance function expects a detoasted VarBit pointer. But the data in the values arena IS a valid varlena copy (we copied the full varlena bytes including the header). So it should work.
+
+Wait, the data IS a valid varlena. Let me think more carefully about what could cause the panic...
+
+Actually, I think the issue might be in how `amsupport = 3` interacts with the number of support functions defined. PostgreSQL's `pg_amproc` catalog expects support functions 1..amsupport, but our bit operator class only defines FUNCTION 1 (distance), not FUNCTION 2 (norm) or FUNCTION 3 (type_info). When the code accesses `rd_support[0]` and `rd_support[1]`, the rd_support array has exactly `amsupport` (3) entries per operator class. Unregistered functions will have `InvalidOid`. But if the array is too short or the access goes out of bounds...
+
+Actually, let me look more carefully at the crash. Let me check if the issue is in the `TupleDescAttr` call or something else:
+
+● Test basic distance computation
+  $ ~/.pgrx/18.2/pgrx-install/bin/pg_ctl -D ~/.pgrx/data-18 status 2>&1 && \
+  ~/.pgrx/18.2/pgrx-install/bin/psql -h /Users/maropu/.pgrx -p 28818 -d pgvector_rx -c "
+  INSERT INTO test_bit (v) VALUES ('10101010'), ('11001100'), ('11110000'), ('00001111');
+  SELECT hamming_distance(a.v, b.v) FROM test_bit a, test_bit b WHERE a.id = 1 AND b.id = 2;
+  " 2>&1
+  └ 8 lines...
+
+Good, hamming_distance works fine. Let me try creating the index:
+
+● Test HNSW index creation
+  $ ~/.pgrx/18.2/pgrx-install/bin/psql -h /Users/maropu/.pgrx -p 28818 -d pgvector_rx -c "CREATE
+  INDEX ON test_bit USING hnsw (v bit_hamming_ops);" 2>&1
+  └ 5 lines...
+
+● Check crash log
+  $ tail -5 /tmp/pg_test.log
+  └ 6 lines...
+
+Let me enable core dumps or add logging to figure out where the crash happens. Let me add some strategic `pgrx::info!()` calls to the ambuild:
+
+● Read src/index/build.rs lines 680-710
+  └ 31 lines read
+
+Let me temporarily add debug logging:
+
+● Read src/index/build.rs lines 266-310
+  └ 45 lines read
+
+Let me check if the issue is that a VarBit with bit(8) has varlena_size that might be unexpectedly small or large. VarBit for bit(8) = 8 bits = 1 byte of data. Total size = VARHDRSZ(4) + VARBITHDRSZ(4) + ceil(8/8)(1) = 9 bytes. But VARSIZE is stored as (size << 2)... actually, looking at PostgreSQL's varlena implementation, for 4-byte headers, `(*(uint32*)ptr) >> 2` gives the total size.
+
+Wait, I'm confused about the varlena format. Let me check:
+
+● Check data sizes
+  $ ~/.pgrx/18.2/pgrx-install/bin/psql -h /Users/maropu/.pgrx -p 28818 -d pgvector_rx -c "
+  SELECT pg_column_size('10101010'::bit(8));
+  SELECT pg_column_size('[1,2,3]'::vector(3));
+  " 2>&1
+  └ 10 lines...
+
+OK so bit(8) is 9 bytes total. Let me check what HNSW_ELEMENT_TUPLE_SIZE does with these sizes:
+
+● Check element tuple size calculation
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  'ELEMENT_TUPLE_SIZE\|element_tuple_size\|etup_size\|HNSW_ELEMENT' src/types/hnsw.rs | head -10
+  └ 6 lines...
+
+● Read src/types/hnsw.rs lines 133-145
+  └ 13 lines read
+
+This looks fine. Let me look at what happens when we flush element tuples to disk. The `create_graph_pages` function:
+
+● Find create_graph_pages
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'fn create_graph_pages' src/index/build.rs
+  └ 2 lines...
+
+● Read src/index/build.rs lines 423-520
+  └ 98 lines read
+
+This all looks type-agnostic and correct. The crash might be happening in the graph building part, not in the disk writing. Let me trace through the `find_element_neighbors` call path:
+
+● Find graph algorithm entry point
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'fn find_element_neighbors\b'
+  src/graph/*.rs | head -5
+  └ 2 lines...
+
+● Find in mod.rs
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'fn find_element_neighbors\b'
+  src/graph/mod.rs
+  └ 2 lines...
+
+● Read src/graph/mod.rs lines 355-400
+  └ 45 lines read
+
+This looks fine. The distance_fn is calling FunctionCall2Coll with the raw varlena pointers. Let me verify this works by running a simple distance comparison manually using bit vectors...
+
+Actually, wait. I think I found the issue! Let me look at how `FunctionCall2Coll` is called from the distance function:
+
+```rust
+let a_ptr = pg_sys::Datum::from(values.as_ptr().add(a_offset) as usize);
+let b_ptr = pg_sys::Datum::from(values.as_ptr().add(b_offset) as usize);
+let result = pg_sys::FunctionCall2Coll(fmgr, collation, a_ptr, b_ptr);
+```
+
+The `hamming_distance` function does:
+```rust
+let a = pg_sys::pg_detoast_datum(fc_arg(fcinfo, 0).cast_mut_ptr()) as *const VarBitHeader;
+```
+
+It calls `pg_detoast_datum` on the datum. `pg_detoast_datum` expects the datum to point to a varlena value. The value in the values arena IS a valid varlena copy, so this should be fine...
+
+But wait, `pg_detoast_datum` checks the varlena header flags. If the first byte has certain flags set (for TOAST format), it might try to detoast and access invalid memory. Since we copied the raw bytes, the header should be correct. For a detoasted value that was already in the main 4-byte header format, copying it raw and pointing to it should still be valid.
+
+Hmm, let me check if the issue is actually simpler. The crash might be an assert failure. Let me check if there's an assertion in PG about data alignment or something. Let me trace with a debug build:
+
+● Restart with verbose logging
+  $ ~/.pgrx/18.2/pgrx-install/bin/pg_ctl -D ~/.pgrx/data-18 stop 2>&1
+  sleep 2
+  ~/.pgrx/18.2/pgrx-install/bin/pg_ctl -D ~/.pgrx/data-18 -l /tmp/pg_test.log start -o "-p 28818 -c
+  unix_socket_directories=/Users/maropu/.pgrx -c log_min_messages=debug5" 2>&1
+  sleep 2
+  └ 5 lines...
+
+● Create index with debug logging
+  $ ~/.pgrx/18.2/pgrx-install/bin/psql -h /Users/maropu/.pgrx -p 28818 -d pgvector_rx -c "
+  CREATE EXTENSION IF NOT EXISTS pgvector_rx;
+  DROP TABLE IF EXISTS test_bit;
+  CREATE TABLE test_bit (id serial, v bit(8));
+  INSERT INTO test_bit (v) VALUES ('10101010'), ('11001100'), ('11110000'), ('00001111');...
+  └ 8 lines...
+
+● Check for panic/error messages
+  $ grep -E 'PANIC|FATAL|thread|panic|abort|assertion|ERROR' /tmp/pg_test.log | tail -20
+  └ 6 lines...
+
+Just "thread caused non-unwinding panic. aborting." - no useful info. Let me try a different approach - let me compile with RUST_BACKTRACE and use lldb to catch the crash:
+
+Actually, let me take a different approach. The issue might be that when I copy the varlena data into the Vec<u8> arena, the alignment might be wrong. The Vec<u8> data pointer isn't guaranteed to be 4-byte aligned, but varlena values need at least 4-byte alignment for the header.
+
+Let me check what the C code does differently. In C pgvector, the values are stored as Datum pointers to palloc'd memory, not copied into a flat buffer.
+
+Actually, let me check something - the issue might be simpler. Let me check if Rust panics for data alignment issues on reads. On x86, unaligned reads don't crash, but the issue might be that `pg_detoast_datum` checks the varlena header and interprets garbage if the alignment is wrong.
+
+Let me verify: in the values arena, are pointers always 4-byte aligned?
+
+● Check how values are stored
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'values.*extend\|values.*push'
+  src/index/build.rs | head -10
+  └ 1 line...
+
+● Check values usage
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n 'values\.' src/index/build.rs | head -20
+  └ 8 lines...
+
+● Read src/index/build.rs lines 305-360
+  └ 55 lines read
+
+I see the problem! The values are appended sequentially to a `Vec<u8>`. For the `vector` type:
+- vector(3) has VARSIZE = 20 bytes (8 header + 12 data = 20). 20 is aligned to 4 bytes ✓
+- All subsequent offsets are also 4-byte aligned ✓
+
+For `bit(8)`:
+- bit(8) has VARSIZE = 9 bytes. 9 is NOT aligned to 4 bytes!
+- The second element starts at offset 9, which is not 4-byte aligned ✗
+- When `pg_detoast_datum` reads the varlena header at an unaligned address, it reads garbage
+
+This is the bug! I need to pad values in the arena to maintain alignment. Let me fix this:
+
+● Edit src/index/build.rs (+6)
+
+Wait, but the Vec<u8> itself might not start at an aligned address either. Actually, `Vec<u8>::as_ptr()` returns a pointer that is at least 1-byte aligned. We need the starting address to also be 8-byte aligned for `values.as_ptr().add(offset)` to work.
+
+Actually, looking at this more carefully, Rust's global allocator typically returns memory that is at least 8-byte aligned (or pointer-aligned). And `Vec<u8>` doesn't change the alignment of the underlying allocation. So `values.as_ptr()` should be at least 8-byte aligned. If we pad each entry to 8-byte alignment, all offsets will be aligned.
+
+But we also need to make sure the first offset (0) is at an aligned location. Since `Vec` allocates aligned memory, offset 0 is fine.
+
+Let me also verify this doesn't break the existing vector type. For `vector(3)`: VARSIZE = 20 bytes. Padding to 8-byte boundary: 24. So each vector takes 24 bytes in the arena instead of 20. This is slightly wasteful but correct.
+
+Actually wait, we should also ensure the `value_offset` starts at an aligned boundary. Let me pad before storing instead:
+
+● Edit src/index/build.rs (+7 -7)
+
+Now let me build and test:
+
+● Check compilation
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --no-default-features --features pg18
+  2>&1 | tail -5
+  └ 3 lines...
+
+● Test bit hamming HNSW index
+  $ cd /Users/maropu/Repositories/pgvector-rx && ~/.pgrx/18.2/pgrx-install/bin/pg_ctl -D
+  ~/.pgrx/data-18 stop 2>&1; sleep 1; cargo pgrx test pg18 pg_test_bit_hamming_hnsw_index 2>&1 |
+  tail -15
+  └ 17 lines...
+
+The bit hamming HNSW index test passes now! Let me run all tests:
+
+● Run all tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | grep -E 'FAILED|test
+  result' | tail -5
+  └ 4 lines...
+
+All 100 tests pass (90 existing + 10 new bit vector tests). Now let me also run the formatting and linting:
+
+● Format and lint
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo fmt && cargo clippy --no-default-features
+  --features pg18 -- -D warnings 2>&1 | tail -10
+  └ 3 lines...
+
+Clean. Now let me port the 4 TAP tests for bit vectors. Let me also check the reference tests:
+
+● View bit duplicates test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat
+  references/pgvector/test/t/023_hnsw_bit_duplicates.pl
+  └ 59 lines...
+
+● View bit insert recall test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat
+  references/pgvector/test/t/021_hnsw_bit_insert_recall.pl
+  └ 117 lines...
+
+● View bit vacuum recall test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat
+  references/pgvector/test/t/022_hnsw_bit_vacuum_recall.pl
+  └ 101 lines...
+
+Now let me port these 4 TAP tests. I'll adapt them the same way the existing tests were adapted (change extension name, remove parallel build tests):
+
+● Create tests/t/020_hnsw_bit_build_recall.pl (+109)
+
+● Create tests/t/021_hnsw_bit_insert_recall.pl (+117)
+
+● Create tests/t/022_hnsw_bit_vacuum_recall.pl (+100)
+
+● Create tests/t/023_hnsw_bit_duplicates.pl (+59)
+
+Now let me run the TAP tests to verify them. First, let me install the extension in release mode:
+
+● Install extension in release mode
+  $ cd /Users/maropu/Repositories/pgvector-rx && ~/.pgrx/18.2/pgrx-install/bin/pg_ctl -D
+  ~/.pgrx/data-18 stop 2>&1; sleep 1; cargo pgrx install --release --pg-config
+  ~/.pgrx/18.2/pgrx-install/bin/pg_config 2>&1 | tail -5
+  └ 8 lines...
+
+● Check TAP test runner
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat tests/run_tap_tests.sh | head -30
+  └ 31 lines...
+
+● Run bit build recall TAP test
+  $ cd /Users/maropu/Repositories/pgvector-rx && bash tests/run_tap_tests.sh
+  020_hnsw_bit_build_recall 2>&1 | tail -30
+  └ 16 lines...
+
+Build recall test passes! Let me run the others:
+
+● Run bit insert recall TAP test
+  $ cd /Users/maropu/Repositories/pgvector-rx && bash tests/run_tap_tests.sh
+  021_hnsw_bit_insert_recall 2>&1 | tail -15
+  └ 16 lines...
+
+● Run bit vacuum recall TAP test
+  $ cd /Users/maropu/Repositories/pgvector-rx && bash tests/run_tap_tests.sh
+  022_hnsw_bit_vacuum_recall 2>&1 | tail -15
+  └ 16 lines...
+
+● Run bit duplicates TAP test
+  $ cd /Users/maropu/Repositories/pgvector-rx && bash tests/run_tap_tests.sh 023_hnsw_bit_duplicates
+   2>&1 | tail -15
+  └ 16 lines...
+
+All 4 bit vector TAP tests pass! Let me now run all existing TAP tests to make sure nothing is broken:
+
+● Run all TAP tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && bash tests/run_tap_tests.sh 2>&1 | tail -30
+  └ 1 line...
+
+● read_bash
+  └ ok 3
+
+All 15 TAP tests pass (221 assertions total)! That's 11 existing + 4 new bit vector tests. Let me also run the pgrx unit tests one more time to confirm:
+
+● Run all pgrx tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | grep 'test result' |
+  tail -5
+  └ 4 lines...
+
+All 100 pgrx tests pass. Now let me commit and push:
+
+● Check staged changes
+  $ cd /Users/maropu/Repositories/pgvector-rx && git add -A && git --no-pager diff --cached --stat
+  └ 10 lines...
+
+● Commit changes
+  $ cd /Users/maropu/Repositories/pgvector-rx && git commit -m '[#8] Add bit vector support with
+  hamming/jaccard distance
+
+  Implement HNSW index support for PostgreSQL built-in bit type:...
+  └ 24 lines...
+
+● Push to remote
+  $ cd /Users/maropu/Repositories/pgvector-rx && git push origin master 2>&1
+  └ 10 lines...
+
+Now let me wait for CI and verify:
+
+● Check CI status
+  $ cd /Users/maropu/Repositories/pgvector-rx && sleep 30 && gh run list --limit 1
+  └ 3 lines...
+
+● Watch CI progress
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh run watch 22022097356 2>&1 | tail -10
+  └ 11 lines...
+
+CI passes. Let me update the GitHub issue:
+
+● Update issue #8
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh issue comment 8 -b "✅ Bit vector support
+  added in commit 9a2af23. Implements hamming_distance(), jaccard_distance(), <~> and <%>
+  operators, bit_hamming_ops and bit_jaccard_ops HNSW operator classes. Made HNSW index
+  build/insert type-agnostic. Ported 4 TAP tests (020-023). All 15 TAP tests pass (221
+  assertions), all 100 pgrx tests pass, CI green....
+  └ 4 lines...
+
+● store_memory
+  └ Memory stored successfully.
+
+
+Total usage est:        3 Premium requests
+API time spent:         15m 17.933s
+Total session time:     41m 31.658s
+Total code changes:     +800 -60
+Breakdown by AI model:
+ claude-opus-4.6         15.3m in, 42.3k out, 15.0m cached (Est. 3 Premium requests)
+ claude-haiku-4.5        177.3k in, 2.4k out, 109.7k cached (Est. 0 Premium requests)

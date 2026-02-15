@@ -1,0 +1,2969 @@
+
+
+I'll start by orienting myself - checking the repository state, open issues, and current build status.
+
+● Check git status
+  $ cd /Users/maropu/Repositories/pgvector-rx && git --no-pager status
+  └ 5 lines...
+
+● Check recent git history
+  $ cd /Users/maropu/Repositories/pgvector-rx && git --no-pager log --oneline -10
+  └ 11 lines...
+
+● List open GitHub issues
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh issue list --state open --limit 30 2>/dev/null
+  └ 11 lines...
+
+● List TAP test files
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls tests/t/*.pl 2>/dev/null | head -40
+  └ 20 lines...
+
+● View Phase 7 issue details
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh issue view 8 2>/dev/null | head -80
+  └ 80 lines...
+
+Based on the stored memories, 19/24 TAP tests pass. The remaining failures are:
+1. **5 sparsevec tests** (028-031, 038) - not yet created
+2. **4 SQL regression tests** - not yet created
+3. Known issues: 011_vacuum (space reuse), 015_duplicates (ef_search=1), 017_filtering (cost)
+
+Let me check the current status of the known failures and see what the next priority should be.
+
+● List reference C files
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls references/pgvector/src/hnsw*.c
+  references/pgvector/src/hnsw*.h 2>/dev/null
+  └ 4 lines...
+
+● Check if sparsevec is implemented
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -r "sparsevec" src/ --include="*.rs" -l
+  2>/dev/null
+  └ 1 line...
+
+● Check reference sparsevec test files
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls references/pgvector/test/sql/hnsw_sparsevec*
+  references/pgvector/test/t/028* references/pgvector/test/t/029* references/pgvector/test/t/030*
+  references/pgvector/test/t/031* references/pgvector/test/t/038* 2>/dev/null
+  └ 7 lines...
+
+Sparsevec is not yet implemented at all. Let me check the reference implementation and understand its scope, then look at what the existing types look like.
+
+● List type implementations
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls src/types/ 2>/dev/null
+  └ 2 lines...
+
+● List sparsevec reference files
+  $ cd /Users/maropu/Repositories/pgvector-rx && ls references/pgvector/src/sparsevec* 2>/dev/null
+  └ 2 lines...
+
+● Check sparsevec reference size
+  $ cd /Users/maropu/Repositories/pgvector-rx && wc -l references/pgvector/src/sparsevec.c
+  references/pgvector/src/sparsevec.h 2>/dev/null
+  └ 4 lines...
+
+Let me understand the existing pattern by examining the halfvec implementation (since it was the most recent type added) and the sparsevec reference code.
+
+● Read src/types/mod.rs
+  └ 6 lines read
+
+● Read references/pgvector/src/sparsevec.h
+  └ 40 lines read
+
+● Check type file sizes
+  $ cd /Users/maropu/Repositories/pgvector-rx && wc -l src/types/halfvec.rs src/types/bitvec.rs
+  src/types/vector.rs
+  └ 5 lines...
+
+● Read references/pgvector/src/sparsevec.c
+  └ 1256 lines read
+
+This is a large implementation (~1256 lines in C). Let me look at the existing halfvec.rs to understand the Rust pattern, and figure out the HNSW support function needed.
+
+● Read src/types/halfvec.rs lines 1-100
+  └ 100 lines read
+
+● Read src/types/halfvec.rs lines 800-920
+  └ 121 lines read
+
+● Check HNSW support functions for types
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "hnsw_halfvec_support\|hnsw_vector_support\|hnsw_bit_support\|TYPE_INFO_PROC\|FUNCTION
+  3\|get_normalize_fn\|sparsevec" src/types/halfvec.rs src/types/vector.rs src/types/bitvec.rs
+  src/index/build.rs src/index/scan.rs src/index/handler.rs 2>/dev/null | head -60
+  └ 14 lines...
+
+Now let me see the rest of halfvec.rs to understand the SQL registration pattern, and look at the HNSW support for vector type:
+
+● Read src/types/halfvec.rs lines 920-1100
+  └ 181 lines read
+
+● Check vector HNSW support
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "hnsw_vector_support\|HnswTypeInfo\|TYPE_INFO_PROC\|HNSW_TYPE_INFO_PROC" src/types/vector.rs |
+  head -20
+  └ 1 line...
+
+Let me look at the vector type's HNSW support and the SQL for reference pgvector's hnsw support for sparsevec:
+
+● Check vector support functions
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "hnsw.*support\|HnswTypeInfo\|HNSW_TYPE_INFO_PROC\|sparsevec" src/types/vector.rs | head -20
+  └ 1 line...
+
+● Check sparsevec references in HNSW code
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn "sparsevec"
+  references/pgvector/src/hnsw*.c references/pgvector/src/hnsw*.h 2>/dev/null | head -20
+  └ 7 lines...
+
+● Check reference SQL for sparsevec HNSW
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -A10 "hnsw_sparsevec_support"
+  references/pgvector/sql/vector.sql 2>/dev/null; grep -rn "hnsw_sparsevec" references/pgvector/sql/
+   2>/dev/null | head -20
+  └ 43 lines...
+
+● Check sparsevec HNSW support details
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -B5 -A30 "hnsw_sparsevec_support"
+  references/pgvector/src/hnswutils.c
+  └ 18 lines...
+
+● Check max nnz validation
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -B5 -A30
+  "HNSW_MAX_NNZ\|sparsevec.*hnsw\|hnsw.*sparsevec" references/pgvector/src/hnswutils.c
+  └ 58 lines...
+
+Now let me check the HNSW_MAX_NNZ constant and how checkValue is used in our existing code:
+
+● Check if checkValue exists
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn
+  "HNSW_MAX_NNZ\|check_value\|checkValue\|max_nnz" src/ --include="*.rs" 2>/dev/null | head -20
+  └ 2 lines...
+
+● Check HNSW_MAX_NNZ definition
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn "HNSW_MAX_NNZ" references/pgvector/src/
+  2>/dev/null | head -10
+  └ 4 lines...
+
+● Check HnswTypeInfo usage
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn "HnswTypeInfo" src/ --include="*.rs"
+  2>/dev/null
+  └ 6 lines...
+
+Now let me understand the full picture. I need to see how get_normalize_fn works and what it expects:
+
+● Read src/index/build.rs lines 110-170
+  └ 61 lines read
+
+● Read src/hnsw_constants.rs
+  └ 164 lines read
+
+Now I have a comprehensive understanding. This is a large task (~1000+ lines for sparsevec). Following the AGENT_PROMPT guidelines, I should create a plan, potentially split the work. Let me check the reference SQL for the full sparsevec SQL definition, and then the TAP tests:
+
+● Check SQL definitions for sparsevec
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -A5 -B2 "sparsevec"
+  references/pgvector/sql/vector.sql | head -100
+  └ 101 lines...
+
+● Check sparsevec test sizes
+  $ cd /Users/maropu/Repositories/pgvector-rx && wc -l references/pgvector/test/t/028*.pl
+  references/pgvector/test/t/029*.pl references/pgvector/test/t/030*.pl
+  references/pgvector/test/t/031*.pl references/pgvector/test/t/038*.pl
+  └ 7 lines...
+
+● Check more sparsevec SQL
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -A20
+  "sparsevec_to_vector\|halfvec_to_sparsevec\|array_to_sparsevec" references/pgvector/sql/vector.sql
+   | head -80
+  └ 70 lines...
+
+Let me see the rest (operators, btree, and HNSW opclasses):
+
+● Check remaining sparsevec SQL
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -A60 "OPERATOR <\+>.*sparsevec"
+  references/pgvector/sql/vector.sql | head -80
+  └ 1 line...
+
+● Get sparsevec operator section
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '/sparsevec operators/,/^$/p'
+  references/pgvector/sql/vector.sql
+  └ 2 lines...
+
+● Get sparsevec opclass section
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '/sparsevec opclasses/,/^$/p'
+  references/pgvector/sql/vector.sql
+  └ 2 lines...
+
+● Get sparsevec operators
+  $ cd /Users/maropu/Repositories/pgvector-rx && awk '/-- sparsevec operators/,/-- sparsevec
+  opclasses/' references/pgvector/sql/vector.sql
+  └ 60 lines...
+
+● Get sparsevec opclasses
+  $ cd /Users/maropu/Repositories/pgvector-rx && awk '/-- sparsevec opclasses/,/^$/'
+  references/pgvector/sql/vector.sql
+  └ 2 lines...
+
+● Get sparsevec opclasses section
+  $ cd /Users/maropu/Repositories/pgvector-rx && awk '/-- sparsevec opclasses/,/^-- [a-z]/'
+  references/pgvector/sql/vector.sql
+  └ 2 lines...
+
+● Find sparsevec opclass definitions
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "sparsevec_ops\|sparsevec_l2_ops\|sparsevec_ip_ops\|sparsevec_cosine_ops\|sparsevec_l1_ops"
+  references/pgvector/sql/vector.sql
+  └ 6 lines...
+
+● Read references/pgvector/sql/vector.sql lines 886-920
+  └ 33 lines read
+
+Now I need to see the reference sparsevec_to_vector/sparsevec_to_halfvec C code too:
+
+● Find sparsevec conversion functions
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "sparsevec_to_vector\|sparsevec_to_halfvec"
+   references/pgvector/src/*.c 2>/dev/null
+  └ 5 lines...
+
+● Get sparsevec_to_vector C code
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '/sparsevec_to_vector/,/^}/p'
+  references/pgvector/src/vector.c
+  └ 20 lines...
+
+● Get sparsevec_to_halfvec C code
+  $ cd /Users/maropu/Repositories/pgvector-rx && sed -n '/sparsevec_to_halfvec/,/^}/p'
+  references/pgvector/src/halfvec.c
+  └ 20 lines...
+
+Now I have full understanding. This is a big task (sparsevec type + all distance functions + HNSW support + TAP tests). Let me create a plan and start with the core type implementation. The TAP tests can come in a separate iteration.
+
+Let me check how the HNSW index code handles dimensions for different types to understand how sparsevec should integrate:
+
+● Check how dims are handled
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "atttypmod\|get_dim\|\.dim\b"
+  src/index/build.rs | head -20
+  └ 2 lines...
+
+● Check SPARSEVEC_MAX_DIM usage
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "SPARSEVEC_MAX_DIM"
+  references/pgvector/src/sparsevec.h references/pgvector/src/hnswutils.c 2>/dev/null
+  └ 3 lines...
+
+Now let me look at the `get_normalize_fn` more closely to understand how sparsevec should be dispatched. The current code uses max_dimensions to distinguish between halfvec (32000) and vector (default). For sparsevec, max_dimensions will be 1000000000.
+
+Let me create the plan file and start implementing:
+
+● Create ~/.copilot/session-state/45525bf4-655a-4fb8-8aa7-75cc8f8f01f3/plan.md (+17)
+
+Now let me look at the existing vector.rs and halfvec.rs more closely to match the exact pattern, and check what functions I need from vector.rs for cast support:
+
+● Check vector.rs public API
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "pub.*fn.*raw\|pub.*VectorHeader\|pub.*fn
+  fc_arg\|pub.*fn vector_data\|pub fn check_dim\|pub fn check_expected_dim\|l2_normalize_raw"
+  src/types/vector.rs | head -20
+  └ 6 lines...
+
+● Check halfvec.rs public API
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "pub.*fn.*raw\|pub.*HalfVecHeader\|pub.*fn
+  halfvec_data\|halfvec_l2_normalize_raw\|pub fn f32_to_half\|pub fn half_to_f32"
+  src/types/halfvec.rs | head -20
+  └ 9 lines...
+
+● Read src/types/vector.rs lines 1-60
+  └ 60 lines read
+
+● Read src/types/vector.rs lines 85-170
+  └ 86 lines read
+
+Now let me look at the existing `fc_arg` helper availability in bitvec.rs for reference:
+
+● Read src/types/bitvec.rs lines 1-50
+  └ 50 lines read
+
+Now I have all the context I need. Let me create the sparsevec.rs file. It will be large (~1000 lines) following the same pattern as halfvec.rs and vector.rs:
+
+● Create src/types/sparsevec.rs (+1673)
+
+Now update the module file and the normalize dispatch:
+
+● Edit src/types/mod.rs (+1)
+
+Now update the `get_normalize_fn` in build.rs to handle sparsevec:
+
+● Edit src/index/build.rs (+7)
+
+Now I also need to check if there's a `checkValue` equivalent we need to add. In the C code, sparsevec has a `SparsevecCheckValue` that validates `nnz <= HNSW_MAX_NNZ`. Let me check if the current build/insert code calls any checkValue:
+
+● Check if checkValue is used in index code
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn "check_value\|checkValue\|HNSW_MAX_NNZ"
+  src/index/ --include="*.rs" 2>/dev/null
+  └ 1 line...
+
+No `checkValue` equivalent is currently implemented. The C implementation calls it during build to enforce that sparsevec nnz doesn't exceed 1000 for HNSW. I should add this validation. Let me check how the C code calls it:
+
+● Check checkValue usage in HNSW code
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "checkValue\|CheckValue"
+  references/pgvector/src/hnsw*.c | head -20
+  └ 8 lines...
+
+● Check where checkValue is called
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -B5 -A5
+  "checkValue.*Datum\|typeInfo->checkValue" references/pgvector/src/hnswutils.c
+  └ 13 lines...
+
+I need to add the checkValue dispatch for sparsevec to validate HNSW_MAX_NNZ (1000, not SPARSEVEC_MAX_NNZ which is 16000). Let me see where this check is done in the build flow:
+
+● Check build.rs value processing
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "detoast\|check_value\|CheckValue\|pg_detoast\|DatumGetPointer\|value_ptr\|Detoast"
+  src/index/build.rs | head -20
+  └ 6 lines...
+
+● Read src/index/build.rs lines 340-400
+  └ 61 lines read
+
+I should add a check_value call for sparsevec after detoasting but before normalization. Let me add a `CheckValueFn` type and integrate it into the build state. Actually, looking more closely, the simpler approach is to just add the check inline in the get_normalize_fn area, returning a type-specific check_value function. Let me approach it differently - I'll add a check function to the build state:
+
+● Check build state structure
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "normalize_fn\|NormalizeFn\|norm_fmgr\|BuildState\|struct Hnsw" src/index/build.rs | head -25
+  └ 25 lines...
+
+● Read src/index/build.rs lines 166-270
+  └ 105 lines read
+
+I need to add a `check_value_fn` to the build state. Let me also add it to the insert path. But first, let me also add a `get_check_value_fn` function:
+
+● Edit src/index/build.rs (+4)
+
+Now add a `get_check_value_fn` function after `get_normalize_fn`:
+
+● Read src/index/build.rs lines 168-180
+  └ 13 lines read
+
+● Edit src/index/build.rs (+36)
+
+Now add the `check_value_fn` field to `HnswBuildState`:
+
+● Read src/index/build.rs lines 210-320
+  └ 111 lines read
+
+● Edit src/index/build.rs (+2)
+
+Now update the `new` function to initialize `check_value_fn`:
+
+● Edit src/index/build.rs (+3)
+
+● Edit src/index/build.rs (+1)
+
+Now add the check_value call in the build callback after detoasting:
+
+● Read src/index/build.rs lines 380-410
+  └ 30 lines read
+
+● Edit src/index/build.rs (+5)
+
+Now I also need to add the same check in the insert path. Let me check:
+
+● Check insert.rs for similar patterns
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "pg_detoast_datum\|detoast\|check_value\|normalize_fn" src/index/insert.rs | head -20
+  └ 7 lines...
+
+● Read src/index/insert.rs lines 1235-1280
+  └ 46 lines read
+
+● Edit src/index/insert.rs (+6)
+
+Now let me try to build and check for errors:
+
+● Check for compilation errors
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check 2>&1 | head -80
+  └ 28 lines...
+
+The build requires pgrx with pg18. Let me use the correct build command:
+
+● Build with pg18 feature
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --features pg18 2>&1 | head -80
+  └ 30 lines...
+
+● Build with pg18 only
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --no-default-features --features pg18
+  2>&1 | tail -60
+  └ 61 lines...
+
+Several issues to fix. Let me see the full error list and fix them:
+
+● Get all errors
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --no-default-features --features pg18
+  2>&1 | grep "^error" | head -20
+  └ 18 lines...
+
+I need to:
+1. Replace `libc` calls with direct C FFI equivalents
+2. Fix `numeric_float4` function pointer type
+
+Let me check how vector.rs handles the same parsing:
+
+● Check how vector/halfvec parse floats
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "strtof\|strtol\|strtod\|__error\|errno"
+  src/types/vector.rs src/types/halfvec.rs 2>/dev/null | head -20
+  └ 1 line...
+
+● Check vector.rs parsing approach
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "parse\|from_str\|strtof"
+  src/types/vector.rs | head -20
+  └ 2 lines...
+
+● Read src/types/vector.rs lines 170-230
+  └ 61 lines read
+
+Good. The vector.rs uses pure Rust parsing. I should do the same for sparsevec - use Rust parsing instead of libc calls. Let me also check how `numeric_float4` is handled in vector.rs:
+
+● Check how vector handles numeric conversion
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "numeric_float4\|DirectFunctionCall"
+  src/types/vector.rs | head -10
+  └ 2 lines...
+
+● Read src/types/vector.rs lines 440-500
+  └ 60 lines read
+
+Now I need to completely rewrite sparsevec_in to use Rust parsing (not libc), and fix the array_to_sparsevec to use OidFunctionCall. Let me rewrite the sparsevec.rs with the fixes:
+
+● Edit src/types/sparsevec.rs (+131 -133)
+
+Now fix the `array_to_sparsevec` function to use `OidFunctionCall1Coll` and `DatumGetFloat4/DatumGetInt32/DatumGetFloat8` instead of direct bit manipulation:
+
+● Edit src/types/sparsevec.rs (+12 -14)
+
+Now try to build again:
+
+● Build check after fixes
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --no-default-features --features pg18
+  2>&1 | tail -40
+  └ 40 lines...
+
+Let me see all 5 errors:
+
+● List all type errors
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --no-default-features --features pg18
+  2>&1 | grep "error\[" | head -10
+  └ 6 lines...
+
+● Get line numbers for type errors
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --no-default-features --features pg18
+  2>&1 | grep -B1 "error\[E0308\]"
+  └ 15 lines...
+
+● Get error locations
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --no-default-features --features pg18
+  2>&1 | grep "^   -->" | head -10
+  └ 1 line...
+
+● Get error locations
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --no-default-features --features pg18
+  2>&1 | grep "^\s*-->" | head -10
+  └ 11 lines...
+
+Issues at lines 589-594 and 804. Let me fix them:
+
+● Read src/types/sparsevec.rs lines 585-600
+  └ 15 lines read
+
+`pq_sendint32` expects `u32` but we have `i32`. Let me fix:
+
+● Edit src/types/sparsevec.rs (+4 -4)
+
+Now fix line 804 (deconstruct_array typlen):
+
+● Read src/types/sparsevec.rs lines 798-815
+  └ 18 lines read
+
+● Edit src/types/sparsevec.rs (+1 -1)
+
+● Build check after type fixes
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --no-default-features --features pg18
+  2>&1 | tail -20
+  └ 3 lines...
+
+It compiles. Now let me run `cargo fmt` and `cargo clippy`:
+
+● Format and lint
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo fmt && cargo clippy --no-default-features
+  --features pg18 --all-targets 2>&1 | tail -30
+  └ 31 lines...
+
+The clippy warnings are about style suggestions, not errors. Let me fix the clippy warnings in my new code:
+
+● Get sparsevec-specific warnings
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo clippy --no-default-features --features pg18
+  --all-targets 2>&1 | grep "sparsevec.rs" | head -20
+  └ 9 lines...
+
+● Check first warning details
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo clippy --no-default-features --features pg18
+  --all-targets 2>&1 | grep -A5 "sparsevec.rs:776"
+  └ 7 lines...
+
+● Read src/types/sparsevec.rs lines 773-785
+  └ 13 lines read
+
+● Edit src/types/sparsevec.rs (+4 -4)
+
+Now fix the `bpos` mutation warning. The issue is that `bpos` is used in `for j in bpos..b_nnz` range but modified inside the loop. I need to use `while` loops instead:
+
+● Read src/types/sparsevec.rs lines 893-960
+  └ 68 lines read
+
+The `bpos` mutation in for-range loops is a clippy warning. These are intentional - matching the C algorithm. The `for j in bpos..b_nnz` uses the *initial* value of `bpos`, and we update it for the next outer iteration. This pattern is correct but clippy flags it. Let me suppress the warning:
+
+● Read src/types/sparsevec.rs lines 870-880
+  └ 11 lines read
+
+● Edit src/types/sparsevec.rs (+1)
+
+● Edit src/types/sparsevec.rs (+1)
+
+Now fix the cosine clamp and the L1 bpos warning:
+
+● Read src/types/sparsevec.rs lines 1025-1050
+  └ 26 lines read
+
+● Edit src/types/sparsevec.rs (+1 -6)
+
+Now add the `#[allow(clippy::mut_range_bound)]` to the L1 distance function:
+
+● Read src/types/sparsevec.rs lines 1038-1060
+  └ 23 lines read
+
+● Edit src/types/sparsevec.rs (+1)
+
+● Check remaining warnings
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo fmt && cargo clippy --no-default-features
+  --features pg18 --all-targets 2>&1 | grep "sparsevec.rs" | head -10
+  └ 1 line...
+
+No more warnings in sparsevec.rs. Now let me run the full test suite:
+
+● Run pgrx tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | tail -30
+  └ 30 lines...
+
+All 120 tests pass. Now let me create the TAP test files for sparsevec. Let me first look at the reference tests:
+
+● Read references/pgvector/test/t/028_hnsw_sparsevec_build_recall.pl
+  └ 129 lines read
+
+I need to adapt this test for pgvector_rx (no parallel build support). Let me look at how the existing tests are adapted:
+
+● Read tests/t/012_hnsw_vector_build_recall.pl
+  └ 100 lines read
+
+Good - it's simplified (no parallel build tests). Now let me also look at the reference insert, vacuum, duplicates, and vacuum_insert tests:
+
+● Read references/pgvector/test/t/029_hnsw_sparsevec_insert_recall.pl
+  └ 110 lines read
+
+● Read references/pgvector/test/t/030_hnsw_sparsevec_vacuum_recall.pl
+  └ 97 lines read
+
+● Read references/pgvector/test/t/038_hnsw_sparsevec_vacuum_insert.pl
+  └ 42 lines read
+
+● Read references/pgvector/test/t/031_hnsw_sparsevec_duplicates.pl
+  └ 58 lines read
+
+Now let me look at how existing tests were adapted. Let me check the insert recall test for reference:
+
+● Read tests/t/013_hnsw_vector_insert_recall.pl
+  └ 110 lines read
+
+Now I have all the patterns. Let me create all 5 sparsevec TAP tests:
+
+● Create tests/t/028_hnsw_sparsevec_build_recall.pl (+101)
+
+● Create tests/t/029_hnsw_sparsevec_insert_recall.pl (+111)
+
+● Create tests/t/030_hnsw_sparsevec_vacuum_recall.pl (+98)
+
+● Create tests/t/031_hnsw_sparsevec_duplicates.pl (+59)
+
+● Create tests/t/038_hnsw_sparsevec_vacuum_insert.pl (+43)
+
+Now let me verify the existing tests still pass and run the build:
+
+● Format and lint code
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo fmt && cargo clippy --no-default-features
+  --features pg18 --all-targets 2>&1 | tail -20
+  └ 12 lines...
+
+Only the pre-existing warning. Now run the pgrx tests:
+
+● Run pgrx tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | tail -30
+  └ 30 lines...
+
+All 120 tests pass. Now let me run a quick TAP test to verify the sparsevec tests work:
+
+● Install extension for TAP tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx install --pg-config=$(which pg_config)
+  --release 2>&1 | tail -5
+  └ 6 lines...
+
+Need to use the correct pg_config for pg18:
+
+● Install extension with pgrx
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx install --release --sudo 2>&1 | tail -10
+  └ 11 lines...
+
+● Check pgrx config
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat ~/.pgrx/config.toml 2>/dev/null && cargo pgrx
+  info pg18 2>/dev/null
+  └ 3 lines...
+
+● Install extension for pg18
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx install --pg-config
+  /Users/maropu/.pgrx/18.2/pgrx-install/bin/pg_config --release 2>&1 | tail -10
+  └ 11 lines...
+
+Now let me run the build recall test first:
+
+● Run sparsevec build recall TAP test
+  $ cd /Users/maropu/Repositories/pgvector-rx &&
+  PG_CONFIG=/Users/maropu/.pgrx/18.2/pgrx-install/bin/pg_config prove -v
+  tests/t/028_hnsw_sparsevec_build_recall.pl 2>&1
+  └ 13 lines...
+
+Need to set the Perl path for PostgreSQL test modules. Let me check how existing tests are run:
+
+● Find PostgreSQL test modules
+  $ find /Users/maropu/.pgrx -name "Cluster.pm" -path "*/PostgreSQL/*" 2>/dev/null
+  └ 2 lines...
+
+● Run sparsevec build recall TAP test with PERL5LIB
+  $ cd /Users/maropu/Repositories/pgvector-rx &&
+  PG_CONFIG=/Users/maropu/.pgrx/18.2/pgrx-install/bin/pg_config
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl prove -v
+  tests/t/028_hnsw_sparsevec_build_recall.pl 2>&1
+  └ 26 lines...
+
+It's picking up a pg17 pg_regress. Need the pg18 src too. Let me check how the existing tests run:
+
+● Find pg18 pg_regress
+  $ ls /Users/maropu/.pgrx/18.2/src/test/regress/pg_regress 2>/dev/null && find
+  /Users/maropu/.pgrx/18.2 -name "pg_regress" 2>/dev/null
+  └ 4 lines...
+
+● Run TAP test with correct pg18 paths
+  $ cd /Users/maropu/Repositories/pgvector-rx &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl prove -v
+  tests/t/028_hnsw_sparsevec_build_recall.pl 2>&1
+  └ 25 lines...
+
+● Run TAP test after cleanup
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl prove -v
+  tests/t/028_hnsw_sparsevec_build_recall.pl 2>&1
+  └ 16 lines...
+
+Build recall test passes! Let me run the other sparsevec tests:
+
+● Run sparsevec insert recall test
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl prove -v
+  tests/t/029_hnsw_sparsevec_insert_recall.pl 2>&1
+  └ 28 lines...
+
+● Run sparsevec vacuum recall test
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl prove -v
+  tests/t/030_hnsw_sparsevec_vacuum_recall.pl 2>&1
+  └ 14 lines...
+
+● Run duplicates and vacuum_insert tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl prove -v tests/t/031_hnsw_sparsevec_duplicates.pl
+  tests/t/038_hnsw_sparsevec_vacuum_insert.pl 2>&1
+  └ 22 lines...
+
+031 passes (5/5). 038 failed - let me investigate:
+
+● Run vacuum_insert test alone for debug
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl prove -v
+  tests/t/038_hnsw_sparsevec_vacuum_insert.pl 2>&1
+  └ 13 lines...
+
+Exit code 29 usually means a signal. Let me check the log file:
+
+● Find log files
+  $ find /Users/maropu/Repositories/pgvector-rx/tmp_check -name "*.log" 2>/dev/null | head -5
+  └ 1 line...
+
+● Find files in tmp_check
+  $ find /Users/maropu/Repositories/pgvector-rx/tmp_check -type f 2>/dev/null | head -20
+  └ 21 lines...
+
+● Find PostgreSQL logs
+  $ find /Users/maropu/Repositories/pgvector-rx/tmp_check -name "postmaster.log" -o -name "*.log"
+  2>/dev/null
+  └ 1 line...
+
+● Check PG server info
+  $ cat /Users/maropu/Repositories/pgvector-rx/tmp_check/t_038_hnsw_sparsevec_vacuum_insert_node_dat
+  a/pgdata/postmaster.opts 2>/dev/null && find /Users/maropu/Repositories/pgvector-rx/tmp_check
+  -name "log*" -type d 2>/dev/null && ls
+  /Users/maropu/Repositories/pgvector-rx/tmp_check/t_038_hnsw_sparsevec_vacuum_insert_node_data/
+  2>/dev/null
+  └ 3 lines...
+
+● Check PG log directory
+  $ find /Users/maropu/Repositories/pgvector-rx/tmp_check -name "log" -type d 2>/dev/null && ls
+  /Users/maropu/Repositories/pgvector-rx/tmp_check/t_038_hnsw_sparsevec_vacuum_insert_node_data/pgda
+  ta/log/ 2>/dev/null
+  └ 1 line...
+
+Let me try running the test with stderr output visible:
+
+● Run vacuum_insert test with perl directly
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl tests/t/038_hnsw_sparsevec_vacuum_insert.pl
+  2>&1 | tail -50
+  └ 2 lines...
+
+✗ read_bash
+  Invalid shell ID: bash_7. Please supply a valid shell ID to read output
+  from.
+
+  <no active shell sessions>
+
+It seems the test might be hanging or crashing. Let me try running with a timeout and capturing stderr separately:
+
+● Run vacuum_insert test with timeout
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl timeout 120 perl
+  tests/t/038_hnsw_sparsevec_vacuum_insert.pl 2>&1; echo "EXIT CODE: $?"
+  └ 3 lines...
+
+● Run with alarm timeout
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e 'alarm 120; exec @ARGV or die "exec:
+  $!\n"' -- perl tests/t/038_hnsw_sparsevec_vacuum_insert.pl 2>&1; echo "EXIT CODE: $?"
+  └ 3 lines...
+
+Exit code 29 = signal SIGSEGV (11) or ... actually 29 is unusual. Let me check the postgresql logs for the crash:
+
+● Find crash logs
+  $ find /Users/maropu/Repositories/pgvector-rx/tmp_check -name "*.log" -o -name "log" 2>/dev/null;
+  ls -la /Users/maropu/Repositories/pgvector-rx/tmp_check/t_038*/pgdata/log/ 2>/dev/null; cat
+  /Users/maropu/Repositories/pgvector-rx/tmp_check/t_038*/pgdata/current_logfiles 2>/dev/null
+  └ 1 line...
+
+● Search for crash indicators
+  $ grep -r "FATAL\|ERROR\|PANIC\|SIGSEGV\|SIGABRT\|TRAP"
+  /Users/maropu/Repositories/pgvector-rx/tmp_check/ 2>/dev/null | head -20
+  └ 6 lines...
+
+There's no log output. Let me enable logging and test with a simpler approach - a manual psql test to check if the test operations work:
+
+● Manual test of sparsevec vacuum flow
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl PG_TEST_EXTRA=kerberos perl -e '
+  use strict;...
+  └ 47 lines...
+
+This is also crashing. Let me check with even fewer operations:
+
+● Minimal sparsevec test
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 27 lines...
+
+Hmm, it worked but no "All done!" output... Let me check:
+
+● Test sparsevec with stderr output
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 48 lines...
+
+No output at all - it's crashing in initdb or early server startup. But wait, the output says "initializing database system by running initdb" which is stdout from the test cluster setup. The process crashes somewhere after that. Let me check if there's a crash log or core dump:
+
+● Check for core dumps
+  $ ls -la /cores/ 2>/dev/null | tail -5; ls -la
+  /Users/maropu/Repositories/pgvector-rx/tmp_check/t_node_data/pgdata/ 2>/dev/null | head -10
+  └ 4 lines...
+
+Interesting - the process crashes during initdb with exit code 29. This seems like a PostgreSQL issue rather than a test issue. Let me check if 038 test pattern works with a smaller dimension:
+
+● Test sparsevec vacuum flow with eval
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 54 lines...
+
+Still exit 29. Something is wrong at the very beginning - even before my test code runs. Let me check if this is a general environment issue:
+
+● Minimal Perl test cluster test
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 18 lines...
+
+The basic cluster works. Let me narrow down the issue:
+
+● Test single sparse insert with high dims
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 38 lines...
+
+That works. Let me try a loop of 100 inserts:
+
+● Test 100 inserts + vacuum
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 42 lines...
+
+Crashes with 100 inserts. Let me try with fewer inserts to find the crash point:
+
+● Test with 20 inserts + vacuum to narrow crash
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 45 lines...
+
+Still crashes even with 20 inserts. Let me try with 5:
+
+● Test with 5 inserts + vacuum
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 44 lines...
+
+Still crashes. Is it happening at delete or vacuum? Let me separate:
+
+● Test insert + delete (no vacuum)
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 43 lines...
+
+Insert + delete works fine. The issue is with VACUUM. Let me add vacuum:
+
+● Test insert + delete + vacuum
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 44 lines...
+
+Vacuum crashes for sparsevec. This is a bug in the vacuum implementation with sparsevec. Let me see if this happens with vector type too (it should work since existing tests pass):
+
+● Test vector vacuum for comparison
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 27 lines...
+
+Vector vacuum works fine. The issue is specific to sparsevec. The problem likely relates to how vacuum reads the sparsevec values from the index — specifically the `repair_graph_element` function which reads vectors from pages and computes distances. Let me examine the vacuum code to understand how it reads values:
+
+● Check vacuum value handling
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "get_value\|value_offset\|value_size\|pallo
+  c_value\|copy_value\|sparsevec\|VARLENA\|varlena\|detoast" src/index/vacuum.rs | head -40
+  └ 7 lines...
+
+● Read src/index/vacuum.rs lines 295-330
+  └ 36 lines read
+
+I see the issue. Line 309: `let varlena_size = (*(data_ptr as *const u32) >> 2) as usize;`
+
+This extracts the varlena size using the standard PostgreSQL pattern (first 4 bytes contain length << 2). But the problem could be with sparsevec vectors that are large — or with the varlena header format.
+
+Let me check what happens with the sparsevec's data. The sparsevec is stored in the HNSW element tuple. Let me check how the data is stored and what sizes are expected:
+
+● Check how values are stored in index
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "MAXALIGN\|varlena_size\|data_size\|value_s
+  ize\|add_element\|insert_element\|init_sparsevec\|VARSIZE\|SET_VARSIZE" src/index/build.rs | head
+  -30
+  └ 12 lines...
+
+● Read src/index/build.rs lines 570-615
+  └ 45 lines read
+
+Now let me look at how the sparsevec data gets stored in the values arena. The key is what happens during insert:
+
+● Check insert value handling
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "varlena_size\|value_size\|VARSIZE"
+  src/index/insert.rs | head -20
+  └ 11 lines...
+
+Let me look at the full insert path where a new element is written to disk:
+
+● Read src/index/insert.rs lines 1325-1370
+  └ 46 lines read
+
+I see the general pattern - the code reads the varlena header `(*(data_ptr as *const u32) >> 2)` to get the size. This is for 4-byte varlena headers. But there's a potential issue: when sparsevec values are read from the HNSW index pages during vacuum's `repair_graph_element`, the `data_ptr` might point to invalid or differently formatted data.
+
+Let me check the `mark_deleted` function more carefully, since that writes zeros over the data:
+
+● Read src/index/vacuum.rs lines 700-750
+  └ 51 lines read
+
+Now let me look at the `repair_graph_element` more closely, especially how it reads the sparsevec data from neighboring elements:
+
+● Read src/index/vacuum.rs lines 260-320
+  └ 61 lines read
+
+I need to check the scan's `search_layer_disk` function which reads element vectors for distance computation during the search:
+
+● Check scan's element value reading
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "varlena_size\|data_ptr\|PageGetItem\|fn
+  search_layer_disk\|fn get_element_value" src/index/scan.rs | head -20
+  └ 8 lines...
+
+● Read src/index/scan.rs lines 155-200
+  └ 46 lines read
+
+Now I understand. In `load_element` (scan.rs:180-181), the `data_ptr` points directly at the on-disk page data and creates a Datum from it, which is passed to the distance function. The distance function (e.g., `sparsevec_l2_distance`) will interpret the Datum as a pointer to a `SparseVecHeader`. This works because the data is still on the buffer page at that point.
+
+But in `repair_graph_element` (vacuum.rs:308-311), it copies the data to palloc'd memory. This should also work. The crash might be happening inside `find_element_neighbors_on_disk` which calls `search_layer_disk`.
+
+Let me check if the issue is with the size of the sparsevec with 100000 dimensions — could the issue be in `init_sparsevec` or the size calculation? Let me also check if this crash happens with a smaller dimension sparsevec:
+
+● Test sparsevec(3) vacuum
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 29 lines...
+
+That works! Sparsevec(3) can vacuum. Let me test with higher dimensions and few nnz:
+
+● Test sparsevec(100000) vacuum with fixed nnz
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 33 lines...
+
+Still crashes! So it's about the dimension 100000, not the nnz count. Let me try the boundary:
+
+● Test sparsevec(1000) vacuum
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 29 lines...
+
+● Test sparsevec(100) vacuum
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 29 lines...
+
+Even dim=100 crashes. Let me try dim=10:
+
+● Test sparsevec(10) vacuum
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 29 lines...
+
+Still crashes! But dim=3 with `::vector::sparsevec(3)` worked. The difference is the vector cast path. Let me try with literal sparsevec(3) using the same format:
+
+● Test literal sparsevec(3) vacuum
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 30 lines...
+
+So the crash happens with literal sparse vectors but NOT with `::vector::sparsevec` casts. The difference must be that cast-produced sparsevecs always have all elements non-zero (nnz==dim), while literals might have different nnz patterns. But wait - `{1:0.5,2:0.3,3:0.7}/3` has nnz=3 == dim=3, same as the vector cast case.
+
+Wait, earlier test with `ARRAY[random(), random(), random()]::vector::sparsevec(3)` — the random values should be non-zero. Let me look at if the actual insert or vacuum is failing. Let me enable server logging:
+
+● Test with server logging enabled
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 53 lines...
+
+● Check server log for crash info
+  $ cat /Users/maropu/Repositories/pgvector-rx/tmp_check/t_node_data/pgdata/log/*.log 2>/dev/null |
+  grep -E "FATAL|ERROR|PANIC|TRAP|trap|Assert|SIGSE|server process" | head -20
+  └ 1 line...
+
+● List log directory
+  $ ls -la /Users/maropu/Repositories/pgvector-rx/tmp_check/t_node_data/pgdata/log/ 2>/dev/null
+  └ 1 line...
+
+● Find any log files
+  $ find /Users/maropu/Repositories/pgvector-rx/tmp_check -name "*.log" -type f 2>/dev/null && find
+  /Users/maropu/Repositories/pgvector-rx/tmp_check -name "log" -type d 2>/dev/null
+  └ 3 lines...
+
+● Check log for errors
+  $ cat /Users/maropu/Repositories/pgvector-rx/tmp_check/t_-e_node_data/pgdata/log/postgresql.log |
+  grep -E "FATAL|ERROR|PANIC|TRAP|trap|Assert|SIGSE|server process|terminated" | head -20
+  └ 4 lines...
+
+There it is! An assertion failure: `Assert(ItemIdHasStorage(itemId))` at `bufpage.h:358`. This is the `PageGetItem` assertion — it checks that the item ID has valid storage before dereferencing.
+
+This is the same issue mentioned in stored memories: "Must check lp_flags()==LP_NORMAL before PageGetItem on assert-enabled PG builds since HNSW pages can have non-LP_NORMAL items."
+
+The fix for `insert.rs` (mentioned in memory about `hnsw_free_offset`) was already done. But the vacuum code's `repair_graph_element` or `mark_deleted` might be hitting a similar issue — accessing an item that doesn't have storage.
+
+Let me check which specific code path triggers this. The crash is during `VACUUM`, so let me look at the vacuum code that calls `PageGetItem`:
+
+● Find PageGetItem calls in vacuum
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "PageGetItem\b" src/index/vacuum.rs
+  └ 7 lines...
+
+Let me check the full crash context more carefully. The assertion is at line 358 of bufpage.h which is in `PageGetItem`. Let me check which vacuum code path is the one triggering it:
+
+● Check full crash log
+  $ cat /Users/maropu/Repositories/pgvector-rx/tmp_check/t_-e_node_data/pgdata/log/postgresql.log |
+  tail -30
+  └ 31 lines...
+
+The crash is in `ambulkdelete` (`vacuum.rs`). Let me look at the stack more carefully: frame 6 is `ambulkdelete`. Let me look at the specific `ambulkdelete` function:
+
+● Read src/index/vacuum.rs lines 120-165
+  └ 46 lines read
+
+Line 143: `pg_sys::PageGetItem(page, item_id)` — this is where the assertion fires. The issue is that after marking elements as deleted and zeroing their data, or after inserting new elements, the page might have items without proper storage (e.g., LP_DEAD or LP_UNUSED items).
+
+Wait, I need to check: does this happen only with sparsevec? The vector tests pass vacuum. Let me look more carefully...
+
+Actually, looking at the stored memory: "vacuum doesn't enable space reuse for subsequent inserts" — this is a known issue from `011_vacuum`. The fix for `hnsw_free_offset` in `insert.rs` was already done. But maybe the issue is related to how the pages are structured after deletions.
+
+Let me check if the issue is specifically in `ambulkdelete` (the first phase that marks tuples for deletion) or in `repair_graph_element`:
+
+● Check backtrace before crash
+  $ cat /Users/maropu/Repositories/pgvector-rx/tmp_check/t_-e_node_data/pgdata/log/postgresql.log |
+  grep -B5 "TRAP:" | head -20
+  └ 7 lines...
+
+The crash is during `VACUUM tst;` (PID 42671). All 5 duplicates were inserted (they have identical values `{1:0.5,2:0.3,3:0.7}/3`). Since these are all duplicates, the HNSW index stores them as heap TIDs in a single element node (up to HNSW_HEAPTIDS=10).
+
+So the issue might be: when all vectors are duplicates, there's only one element in the HNSW graph. After deleting some, vacuum processes the page and tries to iterate over items. But the page might have items in non-LP_NORMAL state.
+
+Let me check what types of items the page has. The issue in the C code was that `ambulkdelete` iterates using `PageGetMaxOffsetNumber` and calls `PageGetItem` on every item. But after deletions, some items might not have storage. Let me check:
+
+● Check LP_NORMAL checks in vacuum
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "ItemIdHasStorage\|LP_NORMAL\|lp_flags\|ItemIdIsNormal\|ItemIdGetLength\|PageGetItemId"
+  src/index/vacuum.rs
+  └ 7 lines...
+
+No `ItemIdHasStorage` or `LP_NORMAL` checks anywhere in vacuum! Let me look at what the C code does:
+
+● Check C vacuum LP_NORMAL handling
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "ItemIdHasStorage\|ItemIdIsNormal\|lp_flags\|LP_NORMAL" references/pgvector/src/hnswvacuum.c |
+  head -20
+  └ 1 line...
+
+● Check C vacuum PageGetItem usage
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "PageGetItem\|PageGetItemId"
+  references/pgvector/src/hnswvacuum.c | head -20
+  └ 6 lines...
+
+The C code also doesn't check `ItemIdHasStorage`. So the C code would also crash on assert-enabled builds if the same scenario happened... unless the C code never creates items without storage on HNSW pages.
+
+Wait, the issue might be about how HNSW pages are managed. In pgvector's HNSW, pages are special pages where ALL items should always have storage — the HNSW implementation never removes items from pages, it only marks them as deleted in the tuple data. So `PageGetItem` should always work.
+
+But maybe the issue is that the Rust implementation is somehow creating items without storage on HNSW pages? Let me check the insert code more carefully. The stored memory says: "Must check lp_flags()==LP_NORMAL before PageGetItem on assert-enabled PG builds since HNSW pages can have non-LP_NORMAL items."
+
+Let me check where items are added to HNSW pages:
+
+● Check insert page item operations
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "PageAddItem\|PageIndexTupleOverwrite\|hnsw_free_offset\|PageIndexTupleDelete" src/index/insert.rs
+   | head -20
+  └ 11 lines...
+
+● Read src/index/insert.rs lines 104-190
+  └ 87 lines read
+
+Good - `hnsw_free_offset` already checks `lp_flags() != LP_NORMAL`. But `ambulkdelete` at line 142-143 does NOT do this check. That's the bug! Let me add the check:
+
+● Read src/index/vacuum.rs lines 138-150
+  └ 12 lines read
+
+Wait - but the question is: how did a non-LP_NORMAL item get into the HNSW page? In the normal HNSW workflow, items are never removed from pages. They're only added via `PageAddItemExtended` or overwritten via `PageIndexTupleOverwrite`. 
+
+But when `PageIndexTupleOverwrite` replaces a tuple with a different size, does it leave gaps? Let me check if there's a scenario where items could become non-LP_NORMAL.
+
+Actually, looking more carefully at the problem: maybe the crash isn't about LP_NORMAL at all. The crash happens in `ambulkdelete`, which is called during the first phase of vacuum. But wait - can this crash also happen with non-duplicate vectors?
+
+Let me test with distinct vectors:
+
+● Test with distinct sparse vectors
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 53 lines...
+
+● Check logs for distinct vector crash
+  $ cat /Users/maropu/Repositories/pgvector-rx/tmp_check/t_-e_node_data/pgdata/log/postgresql.log |
+  grep -E "TRAP|ERROR|FATAL|PANIC" | head -5
+  └ 2 lines...
+
+Same crash with distinct vectors. So this is not a duplicate issue. Let me also check if `mark_deleted` phase or `repair_graph_element` triggers this. Let me add LP_NORMAL checks to all `PageGetItem` calls in vacuum.rs:
+
+● Read src/index/vacuum.rs lines 540-560
+  └ 21 lines read
+
+● Read src/index/vacuum.rs lines 650-670
+  └ 21 lines read
+
+Now I need to add `LP_NORMAL` checks before every `PageGetItem` call in vacuum.rs. Let me also check the `load_neighbor_tids` and `load_element` in scan.rs since they're called during vacuum:
+
+● Check scan.rs PageGetItem calls
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "PageGetItem\b" src/index/scan.rs
+  └ 3 lines...
+
+Let me check if those also need LP_NORMAL checks:
+
+● Read src/index/scan.rs lines 155-175
+  └ 20 lines read
+
+● Read src/index/scan.rs lines 235-260
+  └ 26 lines read
+
+These scan.rs calls operate on specific offno values from neighbor TIDs that should always point to valid items. But in vacuum, the `ambulkdelete` function iterates through ALL items on a page. Let me focus on adding the LP_NORMAL check specifically to vacuum.rs where items are iterated:
+
+● Edit src/index/vacuum.rs (+7)
+
+Now fix the second `ambulkdelete` loop (around line 547-550):
+
+● Read src/index/vacuum.rs lines 550-570
+  └ 21 lines read
+
+● Edit src/index/vacuum.rs (+7)
+
+Now fix the mark_deleted loop (around line 660-661):
+
+● Read src/index/vacuum.rs lines 663-685
+  └ 23 lines read
+
+● Edit src/index/vacuum.rs (+7)
+
+Also, let me check the scan.rs `load_element` and `load_neighbor_tids` — they are called via specific offno values from neighbor references. These should be valid, but let me add safety checks just in case:
+
+● Edit src/index/scan.rs (+7)
+
+● Read src/index/scan.rs lines 243-260
+  └ 18 lines read
+
+● Edit src/index/scan.rs (+7)
+
+Now also check the `repair_graph_element` function in vacuum.rs:
+
+● Read src/index/vacuum.rs lines 298-315
+  └ 18 lines read
+
+● Edit src/index/vacuum.rs (+7)
+
+Now let me also check the `has_deleted_neighbors` function:
+
+● Read src/index/vacuum.rs lines 225-270
+  └ 46 lines read
+
+● Edit src/index/vacuum.rs (+7)
+
+Now let me build and test:
+
+● Build and lint after vacuum fix
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo fmt && cargo clippy --no-default-features
+  --features pg18 --all-targets 2>&1 | tail -15
+  └ 13 lines...
+
+● Run pgrx tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | tail -10
+  └ 10 lines...
+
+Tests pass. Now reinstall and test the vacuum crash:
+
+● Reinstall extension
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx install --pg-config
+  /Users/maropu/.pgrx/18.2/pgrx-install/bin/pg_config --release 2>&1 | tail -5
+  └ 6 lines...
+
+● Test sparsevec vacuum after fix
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 34 lines...
+
+The vacuum crash is fixed! Now let me run the 038 TAP test:
+
+● Run sparsevec vacuum_insert TAP test
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl prove -v
+  tests/t/038_hnsw_sparsevec_vacuum_insert.pl 2>&1
+  └ 16 lines...
+
+First iteration passes but crashes on 2nd iteration. The test inserts 100 vectors, deletes half, vacuums, repeats 3 times. The second round uses many random sparse elements which might have much higher nnz - potentially triggering a crash on a different code path.
+
+Let me debug further - check if it's still the same assertion:
+
+● Debug 038 test with round tracking
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 62 lines...
+
+Hmm, only one test. The eval caught an error in a later round. Let me check logs:
+
+● Check server logs
+  $ cat /Users/maropu/Repositories/pgvector-rx/tmp_check/t_-e_node_data/pgdata/log/postgresql.log |
+  grep -E "FATAL|ERROR|PANIC|TRAP|Assert|server process|terminated" | head -10
+  └ 2 lines...
+
+● Find log files
+  $ find /Users/maropu/Repositories/pgvector-rx/tmp_check -name "*.log" 2>/dev/null
+  └ 1 line...
+
+The test seems to have exited after round 1 because the eval silenced the crash. The problem is that `safe_psql` in the PostgreSQL::Test::Cluster dies on failure, which is caught by eval, but the server then shuts down because of the crash. Let me approach differently:
+
+● Test 100 inserts with dim=100000
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 49 lines...
+
+That passes now! Let me do the full 3-round test like 038:
+
+● Run 038 test again
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl prove -v
+  tests/t/038_hnsw_sparsevec_vacuum_insert.pl 2>&1
+  └ 16 lines...
+
+Still fails! First round passes (ok 1) but second round crashes. The random seed is different each time. Let me check what the srand does here. The TAP test doesn't use srand. Let me add logging:
+
+● Run full 038 equivalent with logging
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 49 lines...
+
+● Check crash logs
+  $ find /Users/maropu/Repositories/pgvector-rx/tmp_check -name "*.log" -exec cat {} \; 2>/dev/null
+  | grep -E "TRAP|FATAL|ERROR|PANIC|Assert" | head -10
+  └ 2 lines...
+
+Different issue! It's not an assertion anymore — it's an error from the Rust code: "pgvector-rx: failed to overwrite neighbor tuple". This is coming from `PageIndexTupleOverwrite` failing, which means the new neighbor tuple is larger than the old one and there isn't enough space.
+
+Let me find where this error is raised:
+
+● Find error source
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "failed to overwrite neighbor tuple"
+  src/index/
+  └ 2 lines...
+
+● Find error source
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn "failed to overwrite neighbor tuple" src/
+  └ 4 lines...
+
+● Read src/index/vacuum.rs lines 370-410
+  └ 41 lines read
+
+The issue is that in `repair_graph_element`, we allocate a new neighbor tuple with `ntup_size = hnsw_neighbor_tuple_size(element_level, m)` and then try to overwrite the old one. But the old and new sizes should be identical since `element_level` and `m` haven't changed. Unless the old tuple was modified (e.g., during an insert's slot reuse where the tuple was overwritten with a different size).
+
+Wait - during insert's `hnsw_free_offset`, a deleted element's slot can be reused by a new element with a different level, which would have a different neighbor tuple size. So after a vacuum round deletes elements and their slots get reused by inserts with different levels, the neighbor tuple could be different sizes. But in this test, there are no concurrent inserts — it's insert, delete, vacuum sequentially.
+
+Actually, the issue might be simpler. When vacuum's `mark_deleted` zeroes the data and changes the version, the neighbor tuple still has its original size. But when `repair_graph_element` reads the element_level and recalculates `ntup_size`, if the element's neighbor tuple had been replaced (through slot reuse in a previous cycle), the sizes might not match.
+
+Wait, actually this test is 3 rounds of insert-delete-vacuum. In round 2, after the first vacuum+delete, the same elements exist in the graph. Then round 2 inserts 100 more elements, some of which may reuse slots from elements deleted in round 1 (via `hnsw_free_offset`). Those reused slots might have different levels, causing different neighbor tuple sizes.
+
+Then round 2 delete + vacuum: when vacuum tries to repair an element whose neighbor tuple was reused with a different size, the `PageIndexTupleOverwrite` would fail because the new tuple is bigger than the old one.
+
+The fundamental issue is: vacuum's `repair_graph_element` computes the neighbor tuple size based on the element's level, but the actual on-disk neighbor tuple might have been resized during a previous slot reuse.
+
+Actually wait, let me re-read the logic. In `repair_graph_element`, we read the element's level from the element tuple (which is on disk). Then we compute `ntup_size = hnsw_neighbor_tuple_size(element_level, m)`. This should match the actual neighbor tuple size because the neighbor tuple was originally created for that element (same level). Even after slot reuse, when a new element takes over the slot, both the element tuple AND the neighbor tuple are overwritten to match the new element's level. So the sizes should always match.
+
+Unless... the version check causes a mismatch. Let me look more carefully:
+
+● Read src/index/vacuum.rs lines 330-400
+  └ 70 lines read
+
+Hmm wait - this is the vacuum repair. But actually, this might be unrelated to the sparsevec type itself. This is a pre-existing vacuum bug that also happens with vector type. Let me check if the existing vacuum test for vectors (011) has similar issues:
+
+Looking at stored memories: "011_vacuum FAIL(1/2 space reuse)" — yes, the vector vacuum test also has a known failure. This might be the same fundamental issue.
+
+The question is: is this error new (caused by my LP_NORMAL fix), or was it already there? Let me check if the original 038 test had this exact pattern:
+
+The 038 test is: insert 100 with random sparse vectors → delete even rows → vacuum → repeat 3x. The `PageIndexTupleOverwrite` could fail if:
+1. An element was reused (via `hnsw_free_offset`) in round 2's inserts 
+2. That reuse created an element with a different level than the original
+3. When round 2's vacuum tries to repair the element, the neighbor tuple has a different size
+
+This is a pre-existing vacuum issue, not specific to sparsevec. The difference is that the 038 test is more aggressive about space reuse.
+
+However, looking more carefully at the error, the issue might be simpler: the `repair_graph_element` function doesn't check the version BEFORE trying to overwrite. If the element was modified concurrently (or between reading and writing), the version might have changed and the data is stale.
+
+Let me look at the C code's repair logic:
+
+● Check C repair logic
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -A 40 "RepairGraphElement"
+  references/pgvector/src/hnswvacuum.c | head -60
+  └ 60 lines...
+
+The C code also calls `PageIndexTupleOverwrite` and errors if it fails. The sizes should match because the element's level defines both the original and new neighbor tuple sizes.
+
+But wait — could the issue be that after a vacuum's `mark_deleted` phase zeroes out elements, and then inserts reuse slots via `hnsw_free_offset`, the neighbor tuple at the old neighbor offno could now belong to a DIFFERENT element (one inserted later)?
+
+Actually, I think the issue is more fundamental. Let me check: when `hnsw_free_offset` reuses a deleted element's slot, it overwrites the element tuple AND the neighbor tuple. The element has a new level, so the neighbor tuple has a new size. If the new element has a higher level than the old one, the neighbor tuple is LARGER. But `PageIndexTupleOverwrite` should handle this — it replaces the tuple with a new one of potentially different size, as long as there's enough space on the page.
+
+Let me look at what `PageIndexTupleOverwrite` does when the new tuple is larger than the old one:
+
+The `PageIndexTupleOverwrite` function in PostgreSQL replaces an existing tuple with a new one. If the new tuple is larger, it may fail if there isn't enough free space on the page. So the error would occur when the element's level results in a larger neighbor tuple than what was originally on the page.
+
+But wait — in `hnsw_free_offset`, the code already checks if there's enough space:
+
+```rust
+if page_free >= etup_size && npage_free >= ntup_size {
+```
+
+So the insert should only reuse a slot if there's enough space for both the new element and neighbor tuples. If a higher-level element is inserted into a slot previously holding a lower-level element, the neighbor tuple would be larger, and there would need to be enough free space on the page.
+
+Actually, this check is for the INSERT's reuse, not for vacuum's repair. During vacuum's `repair_graph_element`, it reads the existing element, finds new neighbors, and overwrites the neighbor tuple. The new neighbor tuple should be the SAME size as the old one (same level, same m). So `PageIndexTupleOverwrite` should always succeed.
+
+Unless... the element was reused between when vacuum reads it and when it tries to write the neighbor tuple. Since vacuum releases the buffer lock between reading and writing, this could happen.
+
+The C code's `RepairGraphElement` reads the element info from memory (the `HnswElement` struct), not directly from disk, because the element info was already loaded during an earlier phase. The element's neighbor page/offno might have changed if the element was reused.
+
+But in our Rust code, we read the element info directly from disk in `repair_graph_element`. And we don't check the version when we write back. Let me check if we should:
+
+Looking at the C code more carefully:
+
+```c
+/* Overwrite tuple */
+if (!PageIndexTupleOverwrite(page, element->neighborOffno, (Item) ntup, ntupSize))
+    elog(ERROR, "failed to add index item to \"%s\"", RelationGetRelationName(index));
+```
+
+The C code also errors on failure. So this is a pre-existing condition that can happen in the C code too. The C code handles it by checking the version in the neighbor tuple before overwriting and skipping if versions don't match.
+
+Wait, let me look more carefully at the C code:
+
+● Check C vacuum overwrite pattern
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -B5 -A30 "PageIndexTupleOverwrite"
+  references/pgvector/src/hnswvacuum.c
+  └ 74 lines...
+
+The C code doesn't do a version check before overwriting in `RepairGraphElement`. It just tries to overwrite and errors if it fails. This means the C code would also hit this error in the same scenario.
+
+But the issue is that this error doesn't happen in the C implementation for the same test (the pgvector test suite for the C code passes). So there must be a difference in how our Rust code manages pages.
+
+Wait — looking at this error more carefully: `"pgvector-rx: failed to overwrite neighbor tuple"`. The `PageIndexTupleOverwrite` returns false when the replacement tuple doesn't fit. This means the replacement neighbor tuple is larger than the existing one at that offset. But it should be the same size since the element level hasn't changed.
+
+Unless: the neighbor tuple at that offset is no longer the element's neighbor tuple. It could have been reused by a different element with a different level (smaller neighbor tuple). This could happen if:
+
+1. Round 1: Element A (level 1, large neighbor tuple) is inserted
+2. Round 1: Element A is deleted and marked for deletion during vacuum 
+3. Round 2: Insert reuses Element A's element slot, but creates a new element B with level 0 (smaller neighbor tuple). The neighbor tuple at A's neighbor offset is now B's, which is smaller.
+4. Round 2: A different element C references A's old neighbor offset. When vacuum tries to repair C, it goes looking at neighbors on the same pages...
+
+Actually no, this scenario doesn't match. Let me think again...
+
+OK, the simpler explanation: In our Rust `mark_deleted`, we zero out the neighbor tuple. But the actual neighbor tuple slot on the page is not resized - its `lp_len` stays the same. So when a subsequent insert reuses that element slot via `hnsw_free_offset`, it overwrites both the element and neighbor tuples. The neighbor tuple overwrite would use `PageIndexTupleOverwrite` which could resize the slot.
+
+Then during vacuum's repair phase, the element at that slot has a certain level, and repair creates a new neighbor tuple for that level. But if the neighbor tuple was already overwritten during the insert phase (slot reuse), it might have a different size.
+
+Actually, I think this is a race condition in the vacuum logic. Let me look at this more carefully. The test doesn't have concurrent access, so it shouldn't be a race condition. But the 3 rounds of insert-delete-vacuum could cause issues.
+
+Let me check: does the C code's mark_deleted zero the neighbor tuple data, or does it only set the deleted flag?
+
+● Check C mark_deleted implementation
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -B5 -A30 "MarkDeleted\|etup->deleted"
+  references/pgvector/src/hnswvacuum.c | head -60
+  └ 60 lines...
+
+● Check C mark_deleted cont.
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -A60 "if (neighborPage == blkno)"
+  references/pgvector/src/hnswvacuum.c | head -70
+  └ 62 lines...
+
+I see an important difference: The C code only zeroes `etup->data` (the vector data after the header), using `MemSet(&etup->data, 0, VARSIZE_ANY(&etup->data))`. But our Rust code zeroes data starting from `(etup + sizeof(HnswElementTupleData))`. Let me check what `etup->data` is:
+
+● Check C element tuple structure
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -B5 -A20 "HnswElementTupleData"
+  references/pgvector/src/hnsw.h | head -40
+  └ 41 lines...
+
+● Check element tuple data field
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -A5 "neighbortid"
+  references/pgvector/src/hnsw.h | head -10
+  └ 7 lines...
+
+OK so in C, `etup->data` is the `Vector` struct embedded at the end of the element tuple. The C code uses `VARSIZE_ANY(&etup->data)` to get the size and zeroes exactly that many bytes.
+
+In our Rust code, we compute the size as `(*(data_ptr as *const u32) >> 2)` which reads the varlena header. This should be equivalent. But wait — let me look at the zeroing code more carefully:
+
+● Read src/index/vacuum.rs lines 720-740
+  └ 21 lines read
+
+Wait, I should also add LP_NORMAL check at line 738-739:
+
+● Read src/index/vacuum.rs lines 735-760
+  └ 26 lines read
+
+But actually, `mark_deleted` runs after `remove_heap_tids` and `repair_graph` phases. The neighbor tuple at `neighbor_offno` should always be valid because the HNSW page management never removes tuples from pages.
+
+Let me focus on the actual error: `PageIndexTupleOverwrite` failure in `repair_graph_element`. This means the replacement tuple is too large. Let me check: is the neighbor tuple size for a sparsevec element potentially different from what was originally stored?
+
+Wait — I think I found the real issue. The problem might be with how vacuum interacts with space reuse (inserts that happened after the first vacuum). In round 2:
+
+1. After round 1 vacuum: some elements are marked deleted 
+2. Round 2 inserts: some inserts reuse deleted element slots via `hnsw_free_offset`
+3. Round 2 delete: some of the newly inserted elements are deleted
+4. Round 2 vacuum repair: tries to repair elements that have deleted neighbors. But some of those neighbor slots may now contain different-sized tuples due to slot reuse.
+
+Actually, let me think about this differently. The `repair_graph_element` creates a NEW neighbor tuple with `ntup_size = hnsw_neighbor_tuple_size(element_level, m)`. The element's own neighbor tuple should be the same size it was when originally created, because the element's level doesn't change. So the overwrite should always succeed, assuming the neighbor tuple slot hasn't been reused by something else.
+
+But `hnsw_free_offset` does NOT reuse neighbor tuple slots of different elements. It only reuses the DELETED ELEMENT'S OWN element+neighbor tuple pair. So the element and neighbor tuple at specific offsets always correspond to each other.
+
+Wait, let me re-read `hnsw_free_offset` more carefully:
+
+● Read src/index/insert.rs lines 280-325
+  └ 46 lines read
+
+Here's the issue! When `hnsw_free_offset` reuses a slot, it overwrites the deleted element's element tuple AND neighbor tuple. The new element may have a different level than the deleted one, so `etup_size` and `ntup_size` would be different. If the new element has a HIGHER level, the neighbor tuple would be LARGER.
+
+`PageIndexTupleOverwrite` can handle larger replacements IF there's enough page free space. But `hnsw_free_offset` only checks `npage_free >= ntup_size`, which accounts for the old tuple's `lp_len` plus the page's exact free space. This should be correct.
+
+But then, when vacuum's `repair_graph_element` later tries to repair THIS element, it would use the element's current level to compute `ntup_size`. Since the element was inserted with its own level, the sizes should match. Unless the element's level stored in the element tuple on disk is wrong.
+
+Actually, I wonder if the issue is something completely different. Let me just check if the `hnsw_neighbor_tuple_size` calculation is consistent between build, insert, and vacuum:
+
+● Check tuple size calculation consistency
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "hnsw_neighbor_tuple_size\|hnsw_element_tuple_size" src/hnsw_constants.rs src/index/*.rs
+  └ 7 lines...
+
+● Check tuple size functions
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -A5 "fn hnsw_neighbor_tuple_size\|fn
+  hnsw_element_tuple_size" src/hnsw_constants.rs
+  └ 1 line...
+
+● Find tuple size function definitions
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn "fn hnsw_neighbor_tuple_size\|fn
+  hnsw_element_tuple_size" src/
+  └ 3 lines...
+
+● Read src/types/hnsw.rs lines 130-180
+  └ 51 lines read
+
+This looks correct. The tuple sizes are deterministic from level and m.
+
+Let me try a completely different approach — let me trace EXACTLY when the overwrite fails in the vacuum test:
+
+● Check overwrite calls in vacuum
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "PageIndexTupleOverwrite"
+  src/index/vacuum.rs
+  └ 3 lines...
+
+Let me add temporary debug logging before the overwrite:
+
+● Read src/index/vacuum.rs lines 385-405
+  └ 21 lines read
+
+● Edit src/index/vacuum.rs (+12 -2)
+
+● Rebuild with debug logging
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx install --pg-config
+  /Users/maropu/.pgrx/18.2/pgrx-install/bin/pg_config --release 2>&1 | tail -3
+  └ 4 lines...
+
+● Run with debug logging
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 48 lines...
+
+● Check error log
+  $ find /Users/maropu/Repositories/pgvector-rx/tmp_check -name "*.log" -exec cat {} \; 2>/dev/null
+  | grep -E "ERROR|FATAL|PANIC|TRAP" | head -5
+  └ 2 lines...
+
+Still the same assertion failure! The LP_NORMAL check didn't help. Let me check the backtrace more carefully:
+
+● Get full backtrace
+  $ find /Users/maropu/Repositories/pgvector-rx/tmp_check -name "*.log" -exec cat {} \; 2>/dev/null
+  | grep -B2 -A30 "TRAP:" | head -40
+  └ 34 lines...
+
+Now I can see the crash is NOT in vacuum! It's in `aminsert` → `load_element` during an INSERT. Frame 4: `load_element`, Frame 5: `find_element_neighbors_on_disk`, Frame 8: `aminsert`.
+
+So the crash happens during round 2's INSERT, not during VACUUM. The `load_element` call in the insert path is trying to read an element that doesn't have storage. This must be happening because vacuum's `mark_deleted` creates items without storage somehow, or because `PageIndexTupleOverwrite` changed the page layout.
+
+Wait — actually the issue might be that `PageIndexTupleOverwrite` during slot reuse could compact the page, potentially invalidating item pointers that were saved before the compaction. But that shouldn't happen since `PageIndexTupleOverwrite` works within the same page transaction.
+
+The real issue is: during INSERT, `find_element_neighbors_on_disk` traverses the graph, calling `load_element` on neighbor offsets. Some of those neighbor offsets may point to items that were deleted and whose data was zeroed during vacuum's `mark_deleted`. After the data is zeroed, the element is still `LP_NORMAL` but has `deleted=1`. The `load_element` should catch this and return `None`.
+
+But the check I added (`lp_flags() != LP_NORMAL`) might have a problem. Let me verify that the items ARE LP_NORMAL:
+
+Actually wait — re-reading the backtrace: the crash is in `PageGetItem__pgrx_cshim` → `load_element`. My LP_NORMAL check in `load_element` should run BEFORE `PageGetItem`. Let me verify my edit was in the right place:
+
+● Read src/index/scan.rs lines 163-185
+  └ 23 lines read
+
+The check IS there at line 171. But the crash is still happening. Let me check if maybe the issue is that `offno` is beyond `maxoffno` on the page:
+
+● Check PageGetItemId definition
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "PageGetItemId"
+  /Users/maropu/.pgrx/18.2/pgrx-install/include/postgresql/server/storage/bufpage.h 2>/dev/null |
+  head -5
+  └ 3 lines...
+
+● Check PageGetItemId implementation
+  $ sed -n '240,260p'
+  /Users/maropu/.pgrx/18.2/pgrx-install/include/postgresql/server/storage/bufpage.h
+  └ 22 lines...
+
+OK wait — `PageGetItemId` returns a pointer to the item ID in the page header's line pointer array. This always succeeds (it's just array indexing) - it doesn't crash even if the offset is invalid.
+
+The crash is in `PageGetItem` (line 358 of bufpage.h), which asserts `ItemIdHasStorage(itemId)`. So the item ID exists but doesn't have storage.
+
+But my check at line 171 verifies `lp_flags() != LP_NORMAL` before calling `PageGetItem`. `LP_NORMAL` is 1, and `ItemIdHasStorage` checks `(itemId->lp_len > 0)` — these are NOT the same check!
+
+Let me look:
+
+● Check ItemIdHasStorage definition
+  $ sed -n '330,370p'
+  /Users/maropu/.pgrx/18.2/pgrx-install/include/postgresql/server/storage/bufpage.h
+  └ 42 lines...
+
+● Check ItemId macros
+  $ grep -n "ItemIdHasStorage\|lp_len\|lp_flags\|LP_NORMAL\|LP_UNUSED\|LP_REDIRECT\|LP_DEAD"
+  /Users/maropu/.pgrx/18.2/pgrx-install/include/postgresql/server/storage/itemid.h 2>/dev/null |
+  head -20
+  └ 21 lines...
+
+So `ItemIdHasStorage` checks `lp_len != 0`, while my check is `lp_flags != LP_NORMAL`. For `LP_NORMAL`, `lp_len > 0` should always be true. For `LP_DEAD`, `lp_len` could be 0 or non-zero.
+
+But wait — the issue might be `LP_UNUSED` items! If `lp_flags == LP_UNUSED` and `lp_len == 0`, my check catches it (LP_UNUSED != LP_NORMAL, return None). That should work.
+
+But wait — what if the offno in the neighbor TID points to a slot that doesn't exist? If the offno exceeds `maxoffno`, `PageGetItemId` would read garbage from memory. Let me check:
+
+Actually, `PageGetItemId` is just `&pd_linp[offsetNumber - 1]`. If `offsetNumber > maxoffno`, it reads past the line pointer array but still within the page. The memory would be part of the free space or tuple data, and the lp_flags field might coincidentally be LP_NORMAL with lp_len > 0, causing the assert to pass but the data to be garbage.
+
+Actually, looking at the backtrace again carefully:
+
+```
+4   pgvector_rx.dylib ... load_element + 518
+5   pgvector_rx.dylib ... find_element_neighbors_on_disk + 207  
+6   pgvector_rx.dylib ... aminsert_inner + 1504
+```
+
+This is during INSERT, not vacuum. The insert traverses the graph to find neighbors for the new element. It reads neighbor TIDs from existing elements and calls `load_element` on each one. If a neighbor TID points to a tuple that was recently deleted and overwritten, the item at that offset might not have storage.
+
+But how would a valid neighbor TID become invalid? When vacuum's `mark_deleted` zeroes the data, it sets `deleted=1` but keeps the item LP_NORMAL. The item should still have storage. Unless `PageIndexTupleOverwrite` during slot reuse somehow removes items from the page.
+
+Actually, I think the issue might be that `PageIndexTupleOverwrite` compacts the page and could change the offsets of existing items. Let me check:
+
+● Check PageIndexTupleOverwrite
+  $ grep -A30 "PageIndexTupleOverwrite"
+  /Users/maropu/.pgrx/18.2/pgrx-install/include/postgresql/server/storage/bufpage.h 2>/dev/null |
+  head -35
+  └ 7 lines...
+
+Let me look at the actual source:
+
+● Check PageIndexTupleOverwrite implementation
+  $ find /Users/maropu/.pgrx/18.2/src -name "bufpage.c" -exec grep -A50 "PageIndexTupleOverwrite" {}
+   \; 2>/dev/null | head -60
+  └ 61 lines...
+
+OK - `PageIndexTupleOverwrite` DOES shift data but DOES NOT change offsets or line pointer array. The line pointers stay in their same positions. So an offno that was valid before should still be valid after.
+
+The problem must be somewhere else. Let me look more carefully at what happens during the insert's graph traversal. The crash happens during INSERT in round 2, which means round 1's vacuum left the index in a state where some items don't have storage.
+
+Let me check: does the `mark_deleted` phase create items without storage? Looking at the code:
+
+1. `mark_deleted` calls `GenericXLogRegisterBuffer(state, buf, 0)` to register the buffer
+2. It modifies `etup->deleted = 1`, zeroes data, clears neighbor TIDs
+3. It commits with `GenericXLogFinish`
+
+None of these operations should create items without storage. The items remain LP_NORMAL with their original size.
+
+Wait — but `hnsw_free_offset` in INSERT uses `PageIndexTupleOverwrite` to replace deleted element tuples. Let me check what happens when the new element has a DIFFERENT VALUE SIZE than the deleted one. For sparsevec, the value size varies based on nnz! A sparsevec with nnz=3 has a much smaller on-disk size than one with nnz=80.
+
+When `PageIndexTupleOverwrite` replaces a large element tuple (high nnz) with a smaller one (low nnz), the tuple data shrinks. The freed space is returned to the page's free space pool. But what about the NEIGHBOR tuple on the same page?
+
+If the element tuple and neighbor tuple are on the SAME page, and the element tuple shrinks, the neighbor tuple's offset might shift because `PageIndexTupleOverwrite` compacts the data. But the line pointer array doesn't change — so the neighbor tuple's lp_offset gets updated correctly by `PageIndexTupleOverwrite`.
+
+Actually wait — `PageIndexTupleOverwrite` only operates on ONE tuple at a time. When we overwrite the element tuple with a smaller one, the data shifts. Then when we overwrite the neighbor tuple, data shifts again. But between these two overwrites, other items' data positions might have changed, but their line pointers should still point to the correct locations.
+
+Hmm, unless there's a different issue. Let me check what the `pgrx_cshim` version of `PageGetItem` does — could it be that the cshim function has a different implementation?
+
+Actually, looking at the stack trace more carefully:
+
+```
+1   pgvector_rx.dylib  PageGetItem__pgrx_cshim + 82
+```
+
+The pgrx cshim wraps the PostgreSQL functions. The assertion fires inside the cshim's `PageGetItem` call. My LP_NORMAL check in `load_element` runs `PageGetItemId` first, checks `lp_flags`, and only then calls `PageGetItem`. But the check IS there.
+
+Unless the problem is that pgrx's `pg_sys::PageGetItemId` is somehow a no-op or returns a different pointer...
+
+Let me check if pgrx's `PageGetItemId` actually works correctly:
+
+● Check pgrx PageGetItemId binding
+  $ grep -r "PageGetItemId" /Users/maropu/.cargo/registry/src/*/pgrx-pg-sys-0.17.0/src/ 2>/dev/null
+  | head -5
+  └ 3 lines...
+
+● Check pgrx PageGetItemId impl
+  $ grep -A5 "pub unsafe fn PageGetItemId"
+  /Users/maropu/.cargo/registry/src/*/pgrx-pg-sys-0.17.0/src/port.rs 2>/dev/null
+  └ 7 lines...
+
+OK this looks correct. But wait, the crash is during INSERT, not vacuum. Let me double-check: maybe the `load_element` check didn't get compiled into the release build? My build was:
+
+```
+cargo pgrx install --pg-config ... --release
+```
+
+Let me check if the code is actually getting compiled. Actually, let me just make the check more defensive — use `ItemIdHasStorage` equivalent directly:
+
+● Edit src/index/scan.rs (+2 -2)
+
+Also check: maybe the issue is that offno is 0 or beyond max. Let me add bounds checking:
+
+● Edit src/index/scan.rs (+2 -1)
+
+Wait, actually `PageGetItemId` with an invalid offno would read past the line pointer array and return garbage memory. Even `lp_flags()` on that garbage could look like LP_NORMAL. Let me check if offno could be 0 (invalid):
+
+● Check load_element callers
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "load_element\|ItemPointerGet"
+  src/index/scan.rs | head -20
+  └ 9 lines...
+
+The offno comes from neighbor TIDs (`ItemPointerGetOffsetNumber`). If a neighbor TID is invalid (zeroed during vacuum), then `ItemPointerGetOffsetNumber` would return 0 (since the TID is all zeros), and offno=0 would cause `PageGetItemId` to read at `pd_linp[-1]` which is UB!
+
+Let me check: does `load_element`'s caller validate that the offno is valid? Let me look at the search_layer_disk:
+
+● Read src/index/scan.rs lines 355-400
+  └ 46 lines read
+
+The neighbor TIDs come from `load_neighbor_tids`. Let me check that function:
+
+● Read src/index/scan.rs lines 268-295
+  └ 28 lines read
+
+Line 275: `if !pg_sys::ItemPointerIsValid(&tid)` — this should catch zeroed-out TIDs (from vacuum's mark_deleted which calls `ItemPointerSetInvalid`). So invalid TIDs should be filtered out.
+
+But wait — what if the neighbor tuple itself was reused? When `hnsw_free_offset` overwrites a deleted element's neighbor tuple with a new element's neighbor tuple, the new tuple could have FEWER slots than the old one (if the new element has a lower level). The old tuple had neighbor TIDs that are now past the end of the new tuple. But `load_neighbor_tids` uses the new tuple's `count` field and the element's `level`, so it should only read the valid range.
+
+Actually, I think the issue might be something completely different. Let me look at the crash more carefully. The crash is at `load_element + 518`. Let me count: from the start of `load_element` to the check, there's about 4 lines of code. 518 bytes of code offset suggests the crash is well into the function, perhaps after the check. Could the check be optimized away?
+
+Let me try building without optimizations to see:
+
+● Install debug build (no --release)
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx install --pg-config
+  /Users/maropu/.pgrx/18.2/pgrx-install/bin/pg_config 2>&1 | tail -5
+  └ 6 lines...
+
+● Run test with debug build
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl prove -v
+  tests/t/038_hnsw_sparsevec_vacuum_insert.pl 2>&1
+  └ 16 lines...
+
+Exit code 4 instead of 29. Let me check the logs:
+
+● Check debug build crash logs
+  $ find /Users/maropu/Repositories/pgvector-rx/tmp_check -name "*.log" -exec cat {} \; 2>/dev/null
+  | grep -E "ERROR|FATAL|PANIC|TRAP" | head -5
+  └ 1 line...
+
+No log files. Let me enable logging explicitly:
+
+● Run test with logging enabled
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl perl -e '
+  use strict;...
+  └ 53 lines...
+
+● Check crash log
+  $ find /Users/maropu/Repositories/pgvector-rx/tmp_check -name "*.log" -exec cat {} \; 2>/dev/null
+  | grep -E "ERROR|FATAL|PANIC|TRAP|terminated" | head -10
+  └ 2 lines...
+
+Now I can see the problem! The values are completely wrong:
+- `m=440` — this should be 16! 
+- `ntup_size=7928` — way too large
+- `old_len=296` — the actual neighbor tuple size on disk
+
+The `m` value being 440 is the bug. Let me check how `vs.m` is set:
+
+● Check vacuum state m initialization
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "vs\.m\|vacuum_state\|HnswVacuumState"
+  src/index/vacuum.rs | head -30
+  └ 19 lines...
+
+● Read src/index/vacuum.rs lines 39-100
+  └ 62 lines read
+
+Line 80: `let (m, _, _, _) = get_meta_page_info(index);` — let me check this function:
+
+● Find get_meta_page_info function
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "fn get_meta_page_info" src/index/
+  └ 2 lines...
+
+● Find get_meta_page_info function
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn "fn get_meta_page_info" src/
+  └ 2 lines...
+
+● Read src/index/scan.rs lines 126-155
+  └ 30 lines read
+
+● Check meta page structure
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "hnsw_page_get_meta\|HnswMetaPageData"
+  src/types/hnsw.rs
+  └ 5 lines...
+
+● Read src/types/hnsw.rs lines 52-80
+  └ 29 lines read
+
+Let me check the C structure:
+
+● Check C meta page structure
+  $ grep -A20 "HnswMetaPageData" references/pgvector/src/hnsw.h | head -25
+  └ 26 lines...
+
+● Check full C meta page structure
+  $ grep -A15 "typedef struct HnswMetaPageData" references/pgvector/src/hnsw.h
+  └ 17 lines...
+
+The Rust structure looks correct and matches the C structure. But wait — `m` returned as 440? Let me check what `hnsw_page_get_meta` does:
+
+● Find hnsw_page_get_meta
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn "fn hnsw_page_get_meta" src/
+  └ 4 lines...
+
+● Read src/index/scan.rs lines 34-50
+  └ 17 lines read
+
+Wait! The C code uses `PageGetContents(page)` which is `(char *) page + MAXALIGN(SizeOfPageHeaderData)`, but the Rust code uses `sizeof(PageHeaderData)` WITHOUT `MAXALIGN`! 
+
+Let me check:
+
+● Check PageHeaderData size
+  $ cd /Users/maropu/Repositories/pgvector-rx && python3 -c "
+  # PageHeaderData size on 64-bit
+  # pd_lsn (8) + pd_checksum (2) + pd_flags (2) + pd_lower (2) + pd_upper (2) + pd_special (2) +
+   pd_pagesize_version (2) + pd_prune_xid (4)
+  # = 24 bytes...
+  └ 10 lines...
+
+Actually, `PageHeaderData` in PostgreSQL 18 includes `pd_linp[FLEXIBLE_ARRAY_MEMBER]`. The `sizeof(PageHeaderData)` in C would include the flexible array member size (which is 0 for FAM). Let me check what pgrx says:
+
+● Check PageHeaderData size usage
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -A5
+  "SizeOfPageHeaderData\|size_of.*PageHeaderData" src/ -r
+  └ 38 lines...
+
+Wait — `std::mem::size_of::<pg_sys::PageHeaderData>()` in pgrx includes the flexible array member. In Rust, the FAM is typically represented as a zero-length array, so `size_of::<PageHeaderData>` should be the size without the array. But pgrx might have a different representation.
+
+Let me check:
+
+● Check pgrx PageHeaderData binding
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -A20 "struct PageHeaderData"
+  target/debug/build/pgrx-pg-sys-*/out/pg18.rs 2>/dev/null | head -25
+  └ 26 lines...
+
+OK - `pd_linp: __IncompleteArrayField<ItemIdData>` — this is a zero-sized type in Rust. So `size_of::<PageHeaderData>()` = pd_lsn(8) + pd_checksum(2) + pd_flags(2) + pd_lower(2) + pd_upper(2) + pd_special(2) + pd_pagesize_version(2) + pd_prune_xid(4) = 24 bytes.
+
+In C, `SizeOfPageHeaderData` is defined separately as `offsetof(PageHeaderData, pd_linp)` which is also 24 bytes. And `MAXALIGN(24) = 24` on a 64-bit system. So the Rust code should be correct.
+
+But the `m` value is 440, which is wrong. 440 in hex is 0x01B8. If we interpret this as reading wrong bytes... 16 in hex is 0x0010. If the meta page is being read with an offset error, the `m` field might be reading from the wrong location.
+
+Wait — actually, the error message came from the debug logging I added in `repair_graph_element`. The m=440 means `vs.m` is 440 at the time vacuum runs. But how?
+
+Let me also check `get_meta_page_info` in `build.rs` vs `scan.rs`:
+
+● Read src/index/build.rs lines 78-90
+  └ 13 lines read
+
+This is correct. But wait — in `build.rs`, the meta page data is written at `header_size` offset. But when reading, the `scan.rs` version also uses `header_size` offset. These should be the same.
+
+Actually, let me re-read the error more carefully: `m=440`. Let me check if that's the m value or the vs.m:
+
+Looking at the error message format I added:
+```
+ntup_size={}, old_len={}, free_space={}, level={}, m={}, offno={}
+```
+And the output:
+```
+ntup_size=7928, old_len=296, free_space=116, level=1, m=440, offno=25
+```
+
+m=440 → `hnsw_neighbor_tuple_size(1, 440)` = MAXALIGN(4 + (1+2)*440*6) = MAXALIGN(4 + 7920) = MAXALIGN(7924) = 7928. That matches ntup_size=7928.
+
+But m should be 16 (the default). Something is returning 440 for m from the meta page.
+
+Hmm, 440 in binary is 0000000110111000. Let me think... if the struct alignment is off, we might be reading the wrong field. Let me check: what if `PageGetContents` returns a different offset than `page + sizeof(PageHeaderData)`?
+
+● Check PageGetContents definition
+  $ grep "PageGetContents\|SizeOfPageHeaderData"
+  /Users/maropu/.pgrx/18.2/pgrx-install/include/postgresql/server/storage/bufpage.h | head -5
+  └ 6 lines...
+
+● Check PageGetContents implementation
+  $ grep -A5 "PageGetContents"
+  /Users/maropu/.pgrx/18.2/pgrx-install/include/postgresql/server/storage/bufpage.h | head -10
+  └ 11 lines...
+
+`PageGetContents` returns `page + MAXALIGN(SizeOfPageHeaderData)`. `SizeOfPageHeaderData = offsetof(PageHeaderData, pd_linp)`. On a 64-bit system, this is 24. `MAXALIGN(24)` = 24 (already aligned to 8 bytes).
+
+And in our Rust code: `page + size_of::<PageHeaderData>()`. The `size_of::<PageHeaderData>()` in Rust includes the `__IncompleteArrayField<ItemIdData>` which has size 0. So `size_of` = 24. Same as C.
+
+Let me verify this at runtime:
+
+● Check meta page function location
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "fn hnsw_page_get_meta\b" src/index/scan.rs
+  └ 2 lines...
+
+Let me add a debug assertion to `get_meta_page_info` to verify:
+
+● Read src/index/scan.rs lines 126-148
+  └ 23 lines read
+
+Wait, actually I wonder if this is a pre-existing bug in vacuum that happens WITH BOTH vector and sparsevec types, but only manifests when running enough rounds with enough data. Let me check if the existing vector vacuum test has a similar crash:
+
+● Check existing vector vacuum test
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat tests/t/011_hnsw_vacuum.pl
+  └ 55 lines...
+
+The vector vacuum test (011) does insert 10000 → delete all → vacuum → insert 10000 → check size. It then deletes all but one → vacuum → query. Let me check if it has the same `m=440` bug:
+
+● Run vector vacuum test
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl prove -v tests/t/011_hnsw_vacuum.pl 2>&1
+  └ 10 lines...
+
+OK, 011 passes. But the 038 test does multiple rounds. Let me look at the actual 038 test more carefully:
+
+● Read tests/t/038_hnsw_sparsevec_vacuum_insert.pl
+  └ 42 lines read
+
+So the 038 test does 3 rounds of: insert 100 random sparse vectors → delete half → VACUUM. The crash happens during round 2's inserts (after round 1's vacuum).
+
+Let me check what's happening with the m value. The m=440 could be coming from the `HnswVacuumState`. Let me check vacuum.rs:
+
+● Check vacuum state m usage
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "vs\.m\|HnswVacuumState"
+  src/index/vacuum.rs | head -30
+  └ 19 lines...
+
+● Read src/index/vacuum.rs lines 39-95
+  └ 57 lines read
+
+OK, so `vs.m` is read from the meta page once during `HnswVacuumState::new()`. This calls `get_meta_page_info` from `scan.rs` which returns `(*metap).m as i32`. If the meta page is valid (magic number check passes), then m should be correct.
+
+But wait — actually, looking at the error output more carefully: the crash happens during INSERT (aminsert), not during vacuum. The `m=440` wouldn't be from vacuum state. Let me look at the insert path:
+
+● Check insert.rs m usage
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "\.m\b\|get_meta_page_info"
+  src/index/insert.rs | head -20
+  └ 4 lines...
+
+Hmm, the insert path doesn't read m from meta page. Let me see where the insert gets m:
+
+● Check m field usage in insert.rs
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "\.m\b" src/index/insert.rs | head -30
+  └ 1 line...
+
+● Check m variable usage in insert.rs
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "\bm\b" src/index/insert.rs | head -30
+  └ 21 lines...
+
+● Read src/index/insert.rs lines 1275-1285
+  └ 10 lines read
+
+OK, so insert gets `m` from `HnswOptions::get_m(index_relation)` which reads the reloptions. This should be correct as it's a fixed value from the index definition.
+
+Now, the crash occurs during `load_element` which is called during search within insert. The crash is in `PageGetItem`. Let me re-check the exact error message. Let me re-run the 038 test:
+
+● Check git status
+  $ cd /Users/maropu/Repositories/pgvector-rx && git status | head -20
+  └ 21 lines...
+
+● Install extension for testing
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx install --pg-config
+  /Users/maropu/.pgrx/18.2/pgrx-install/bin/pg_config --release 2>&1 | tail -5
+  └ 6 lines...
+
+● Run 038 test to reproduce crash
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl prove -v
+  tests/t/038_hnsw_sparsevec_vacuum_insert.pl 2>&1
+  └ 16 lines...
+
+It passes round 1 but crashes in round 2. Let me check the server log:
+
+● Find server log
+  $ find /Users/maropu/Repositories/pgvector-rx/tmp_check -name "*.log" 2>/dev/null | head -3
+  └ 1 line...
+
+● Find server logs
+  $ find /tmp -name "*.log" -path "*pgvector*" -o -name "*.log" -path "*node*" 2>/dev/null | head -5
+  └ 1 line...
+
+● Find recent postmaster logs
+  $ find /tmp -name "postmaster.log" -newer /Users/maropu/Repositories/pgvector-rx/Cargo.toml
+  2>/dev/null | head -5
+  └ 1 line...
+
+● Find node logs
+  $ find / -maxdepth 5 -name "*.log" -newer /Users/maropu/Repositories/pgvector-rx/Cargo.lock -path
+  "*node*" 2>/dev/null | head -5
+  └ 1 line...
+
+● stop_bash
+  └ <command with id: 194 stopped>
+
+● Check tmp_check dir
+  $ ls -la /Users/maropu/Repositories/pgvector-rx/tmp_check/ 2>/dev/null
+  └ 6 lines...
+
+● Find logs in tmp_check
+  $ find /Users/maropu/Repositories/pgvector-rx/tmp_check -name "*.log" -o -name "*.conf"
+  2>/dev/null | head -10
+  └ 5 lines...
+
+No server log. Let me modify the test to capture the error from psql directly:
+
+● Run debug version of 038
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat > /tmp/test_038_debug.pl << 'EOF'
+  use strict;
+  use warnings FATAL => 'all';
+  use PostgreSQL::Test::Cluster;
+  use PostgreSQL::Test::Utils;...
+  └ 92 lines...
+
+Now I can see the error clearly. The VACUUM is failing with `m=32760` and `ntup_size=589688`. That's wrong. The m should be 16 (default).
+
+32760 in hex = 0x7FF8. That looks like a corrupted value. Let me check where vacuum reads the element level and m:
+
+● Read src/index/vacuum.rs lines 289-400
+  └ 112 lines read
+
+The m=32760 comes from `vs.m` which is read from `get_meta_page_info(index)` in `HnswVacuumState::new()`. Let me check HnswMetaPageData struct:
+
+● Check HnswMetaPageData struct
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -A25 "pub struct HnswMetaPageData"
+  src/types/hnsw.rs
+  └ 27 lines...
+
+Now let me compare with the C version:
+
+● Check C HnswMetaPageData struct
+  $ grep -A25 "typedef struct HnswMetaPageData"
+  /Users/maropu/Repositories/pgvector-rx/references/pgvector/src/hnsw.h
+  └ 27 lines...
+
+The structs match exactly. C: uint32, uint32, uint32, uint16, uint16, BlockNumber(uint32), OffsetNumber(uint16), int16, BlockNumber(uint32) = 4+4+4+2+2+4+2+2+4 = 28 bytes.
+
+Rust: u32, u32, u32, u16, u16, u32, u16, i16, u32 = 4+4+4+2+2+4+2+2+4 = 28 bytes. Same.
+
+And the Rust struct is `#[repr(C)]`, so it should have identical layout. The magic number check passes, so we're reading from the right offset. m=16 should be correct when it's first read.
+
+Wait — m=32760 from vacuum. But the insert path gets m from reloptions. What if the meta page is getting corrupted during the BUILD or INSERT phase?
+
+Let me add debug output to print what meta page returns:
+
+● Read src/index/scan.rs lines 126-147
+  └ 21 lines read
+
+OK, let me add temporary logging to see what `m` value is being read:
+
+● Edit src/index/scan.rs (+13)
+
+● Rebuild with debug logging
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx install --pg-config
+  /Users/maropu/.pgrx/18.2/pgrx-install/bin/pg_config --release 2>&1 | tail -3
+  └ 4 lines...
+
+● Run debug test to see meta page values
+  $ cd /Users/maropu/Repositories/pgvector-rx && cat > /tmp/test_038_debug2.pl << 'SCRIPT'
+  use strict;
+  use warnings FATAL => 'all';
+  use PostgreSQL::Test::Cluster;
+  use PostgreSQL::Test::Utils;...
+  └ 71 lines...
+
+● Check debug output
+  $ grep "pgvector-rx DEBUG\|Vacuum failed\|Insert failed"
+  /var/folders/g6/ghvfrhk135x3w27vzccnchtm0000gn/T/copilot-tool-output-1771099664159-bwsosy.txt |
+  head -30
+  └ 31 lines...
+
+Interesting! The vacuum reads `m=224` from the meta page, while all the insert operations read `m=16`. The first line shows the vacuum's `get_meta_page_info` returns `m=224`. But that same meta page when read from inserts shows `m=16`.
+
+Wait, that can't be right. Unless the meta page is being corrupted by vacuum itself. Let me look at the `update_meta_page` function in vacuum:
+
+● Find update_meta_page in vacuum
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "update_meta_page\|UpdateMetaPage"
+  src/index/vacuum.rs
+  └ 6 lines...
+
+● Find update_meta_page function
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "pub.*fn update_meta_page"
+  src/index/insert.rs
+  └ 2 lines...
+
+● Read src/index/insert.rs lines 967-1010
+  └ 44 lines read
+
+This looks correct - it only updates entry_blkno/offno/level and insert_page. It never touches m.
+
+But wait - there's `hnsw_page_get_meta_mut` here that's from scan.rs. Let me check where it's used during vacuum:
+
+● Read src/index/vacuum.rs lines 775-800
+  └ 26 lines read
+
+OK. So at the end of vacuum, it calls `update_meta_page` with `update_entry_mode=0` (which is `HNSW_UPDATE_ENTRY_ALWAYS=0`). Wait, let me check:
+
+● Check update entry constants
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep "HNSW_UPDATE_ENTRY" src/types/hnsw.rs
+  └ 1 line...
+
+● Find HNSW_UPDATE_ENTRY constants
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -rn "HNSW_UPDATE_ENTRY" src/
+  └ 12 lines...
+
+So at vacuum line 793: `update_entry_mode=0`, which is not `HNSW_UPDATE_ENTRY_ALWAYS(=2)` nor `HNSW_UPDATE_ENTRY_GREATER(=1)`. So should_update is false. And `insert_page != InvalidBlockNumber`, so it updates only `insert_page`. Good.
+
+Wait, actually `update_entry_mode == HNSW_UPDATE_ENTRY_ALWAYS` is `0 == 2` = false. And `update_entry_mode == HNSW_UPDATE_ENTRY_GREATER` is `0 == 1` = false. So neither updates entry. That's correct for the end-of-mark_deleted call.
+
+But looking at lines 476-485:
+
+● Read src/index/vacuum.rs lines 460-500
+  └ 41 lines read
+
+OK so the vacuum calls `get_meta_page_info` at line 470. And this is where `m=224` is read. But insert calls read `m=16` from the same meta page.
+
+Wait - that's impossible unless the meta page was corrupted between the last insert and the vacuum. Let me look more closely at the timings:
+
+The first group `m=224` at the top is the vacuum in round 2. Before that, inserts all show `m=16`. So somehow the meta page gets corrupted. 
+
+But `update_meta_page` doesn't touch `m`. So what's corrupting it?
+
+Let me check `mark_deleted` more carefully:
+
+● Read src/index/vacuum.rs lines 664-800
+  └ 137 lines read
+
+Wait! `mark_deleted` starts scanning from `HNSW_HEAD_BLKNO`. What is `HNSW_HEAD_BLKNO`?
+
+● Check page constants
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep "HNSW_HEAD_BLKNO\|HNSW_METAPAGE_BLKNO"
+  src/hnsw_constants.rs
+  └ 3 lines...
+
+OK, so mark_deleted starts at block 1 (head), not the meta page (block 0). That's correct.
+
+But wait — could the meta page be on block 0 and mark_deleted DOES iterate block 0? No, it starts at block 1. So mark_deleted never touches the meta page.
+
+Let me think about this differently. The meta page reads `m=224` during vacuum (round 2). But inserts in round 2 (before vacuum) read `m=16`. The meta page wasn't touched between the inserts and the vacuum in round 2. So the meta page must still have `m=16`.
+
+Unless... the meta page was corrupted by round 1's vacuum. Let me look at the timeline again:
+
+Round 1: inserts (m=16) → delete → vacuum (corrupts meta page) → `m=224`
+Round 2: inserts (m=16 from reloptions, not meta page) → delete → vacuum reads `m=224` → crash
+
+Let me check if there's any meta page access during round 1 vacuum:
+
+Wait, actually the `get_meta_page_info` call happens at the beginning of vacuum (in `HnswVacuumState::new()`), which reads m. Also at line 470 (repair_graph function). But by that point, has the meta page been written?
+
+Let me look at the entire vacuum flow:
+
+● Read src/index/vacuum.rs lines 820-870
+  └ 51 lines read
+
+OK, at line 831: `HnswVacuumState::new()` calls `get_meta_page_info()` which reads `m` from meta page.
+
+In round 1: inserts all read `m=16` correctly. Then vacuum reads `m=?`. The output I captured doesn't show round 1 vacuum's `get_meta_page_info` call, because that test only printed lines with "pgvector-rx DEBUG" matching from the server log. Let me re-run and capture ALL the meta page reads.
+
+Actually wait — I see the output showed "Round 1: inserting" → inserts → "Deleting half" → "Vacuuming" → `ok 1` → "Round 2: inserting" → inserts → "Deleting half" → "Vacuuming" → `Vacuum failed round=2: m=224`.
+
+But the DEBUG lines from the server log show the INITIAL create index call also calls `get_meta_page_info` (the two lines at build: `m=16, entry_blkno=4294967295`), then all the inserts (all `m=16`), then... the vacuum round 1 should also call `get_meta_page_info`. Let me check more carefully:
+
+● Count debug lines
+  $ grep "pgvector-rx DEBUG"
+  /var/folders/g6/ghvfrhk135x3w27vzccnchtm0000gn/T/copilot-tool-output-1771099664159-bwsosy.txt | wc
+   -l
+  └ 2 lines...
+
+● Find last m=16 entries
+  $ grep "pgvector-rx DEBUG"
+  /var/folders/g6/ghvfrhk135x3w27vzccnchtm0000gn/T/copilot-tool-output-1771099664159-bwsosy.txt |
+  awk '{print NR, $0}' | grep "m=16\b" | tail -5
+  └ 6 lines...
+
+● Show transition from m=16 to m=224
+  $ grep "pgvector-rx DEBUG"
+  /var/folders/g6/ghvfrhk135x3w27vzccnchtm0000gn/T/copilot-tool-output-1771099664159-bwsosy.txt |
+  awk '{print NR, $0}' | sed -n '420,430p'
+  └ 12 lines...
+
+Line 422: `m=16, insert_page=0` — this is the first vacuum call reading the meta page. `insert_page=0` is suspicious (it should be one of the data pages, not the meta page).
+
+Line 423: `m=112` — THIS IS THE CORRUPTION. Right after line 422, the next read shows `m=112`. Then it varies: m=24, m=80, m=72, m=224. The m field is changing randomly!
+
+And importantly, `insert_page=0` at line 422 which means the `update_meta_page` at the end of `mark_deleted` set `insert_page=0`. Wait, `insert_page=0` means block 0 which is the META page. That's wrong!
+
+Actually wait, line 422 is from vacuum round 1 (PID 51635). The first vacuum reads `m=16`. Then after vacuum round 1 finishes, the next reads (different PIDs for round 2 inserts) show corrupted m values.
+
+But how? Let me look at what `update_meta_page` does at the end of `mark_deleted`:
+
+```rust
+if insert_page != pg_sys::InvalidBlockNumber {
+    update_meta_page(
+        vs.index,
+        0,    // update_entry_mode = 0 (neither ALWAYS nor GREATER, so no entry update)
+        pg_sys::InvalidBlockNumber,
+        pg_sys::InvalidOffsetNumber as pg_sys::OffsetNumber,
+        -1,
+        insert_page,
+    );
+}
+```
+
+OK but wait — the `update_meta_page` function uses `hnsw_page_get_meta_mut(page)`. It reads the page via `GenericXLogRegisterBuffer` and writes the `entry` and `insert_page` fields. It should NOT touch `m`. Unless there's something else going on...
+
+Hold on. Let me check if there's an issue with `GenericXLogRegisterBuffer`. After `GenericXLogFinish`, the page changes are written to WAL and become permanent. The data on the page should be exactly what was written. Unless some other part of the code is writing to the meta page.
+
+Actually, wait. Let me look at `hnsw_page_get_meta_mut` more carefully:
+
+```rust
+pub(crate) unsafe fn hnsw_page_get_meta_mut(page: pg_sys::Page) -> *mut HnswMetaPageData {
+    let header_size = std::mem::size_of::<pg_sys::PageHeaderData>();
+    (page as *mut u8).add(header_size) as *mut HnswMetaPageData
+}
+```
+
+And `hnsw_page_get_meta`:
+```rust
+pub(crate) unsafe fn hnsw_page_get_meta(page: pg_sys::Page) -> *const HnswMetaPageData {
+    let header_size = std::mem::size_of::<pg_sys::PageHeaderData>();
+    (page as *const u8).add(header_size) as *const HnswMetaPageData
+}
+```
+
+These both use `size_of::<PageHeaderData>()` as the offset. In C, pgvector uses `PageGetContents()` which returns `page + MAXALIGN(SizeOfPageHeaderData)`. We verified that `MAXALIGN(24) == 24` so they should be the same.
+
+But wait — could `size_of::<PageHeaderData>()` in Rust be DIFFERENT from `SizeOfPageHeaderData` in C? `SizeOfPageHeaderData` in C is `offsetof(PageHeaderData, pd_linp)`, which is the offset of the flexible array member. In Rust, `size_of::<PageHeaderData>()` would be the total struct size including the `__IncompleteArrayField<ItemIdData>`.
+
+`__IncompleteArrayField<T>` has size 0 and alignment 1. So `size_of::<PageHeaderData>()` = 24 + 0 = 24. And alignment might add padding. Let me check what the struct alignment is:
+
+Wait, the last field before `pd_linp` is `pd_prune_xid: TransactionId` (u32, 4 bytes), at offset 20. So after it we're at offset 24. The `__IncompleteArrayField<ItemIdData>` (ItemIdData is 4 bytes, alignment 4) would have alignment 4, but `__IncompleteArrayField` has alignment 1. So no padding is added. `size_of::<PageHeaderData>()` = 24.
+
+OK so the offset is correct. 24 in both C and Rust.
+
+Hmm, let me think about what could corrupt just the `m` field. At offset 12-13 in the HnswMetaPageData. Absolute offset from page start: 24 + 12 = 36.
+
+Actually wait, could there be an issue with how the meta page is initialized? Let me check:
+
+● Find meta page init in build
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "init_meta_page\|InitMetaPage\|meta.*init\|HnswMetaPageData::new" src/index/build.rs | head -10
+  └ 2 lines...
+
+● Read src/index/build.rs lines 889-940
+  └ 51 lines read
+
+Wait! At line 894, `hnsw_page_get_meta` returns `*mut HnswMetaPageData` (in build.rs this is the mutable version). But the page was allocated with `hnsw_new_buffer`. Let me check `hnsw_init_page`:
+
+● Find hnsw_init_page
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "fn hnsw_init_page" src/index/build.rs
+  └ 2 lines...
+
+● Read src/index/build.rs lines 59-78
+  └ 20 lines read
+
+OK, `PageInit` initializes the page. This is fine — standard PostgreSQL page initialization.
+
+Let me think about this differently. The `m` field is at offset 12 within HnswMetaPageData. The values I see are:
+- m=16 (correct, 0x0010)  
+- m=112 (0x0070)
+- m=24 (0x0018)
+- m=80 (0x0050)
+- m=72 (0x0048)
+- m=224 (0x00E0)
+
+These look like they have byte values that could be from the low byte of larger values. Like 0x70, 0x18, 0x50, 0x48, 0xE0... these look like sizes or offsets.
+
+Wait — could this be an issue with the meta page being corrupted because `pd_lower` is set incorrectly and data is being written into the meta page area?
+
+At line 906: 
+```rust
+(*header).pd_lower = (metap as usize + std::mem::size_of::<HnswMetaPageData>() - page as usize) as u16;
+```
+
+This sets `pd_lower = 24 + 28 = 52`. This marks the area after the meta data as the start of free space. So insertions into this page would start at offset 52 and go upward.
+
+But wait — the meta page should NOT have any tuples inserted into it. Let me check whether something is inserting tuples into the meta page...
+
+Actually, I think the issue might be in `insert.rs` where it uses `insert_page` from the meta page. After vacuum, `insert_page` is set to a low block number (like 0, 2, etc.). What if `insert_page=0` means the meta page itself?
+
+● Check insert_page transition
+  $ grep "pgvector-rx DEBUG"
+  /var/folders/g6/ghvfrhk135x3w27vzccnchtm0000gn/T/copilot-tool-output-1771099664159-bwsosy.txt |
+  awk '{print NR, $0}' | sed -n '415,425p'
+  └ 12 lines...
+
+Line 422 shows `insert_page=0` — this is the first call in vacuum round 1 (PID 51635). At this point `m=16` is still correct. Then line 423 (PID 51637, which is an insert in round 2 AFTER vacuum finished) shows `m=112`.
+
+So after vacuum completes, the meta page has corrupted `m` value. The vacuum set `insert_page=0`. But `insert_page=0` is `HNSW_METAPAGE_BLKNO`! That means after vacuum, when insert tries to add a new tuple, it might be inserting into the meta page!
+
+Let me check the insert code that uses `insert_page`:
+
+● Check insert_page usage in insert.rs
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "insert_page" src/index/insert.rs | head
+  -30
+  └ 31 lines...
+
+● Read src/index/insert.rs lines 58-70
+  └ 13 lines read
+
+● Read src/index/insert.rs lines 189-260
+  └ 72 lines read
+
+Line 201-209: `insert_page` is used as the starting block number for finding space. If `insert_page=0`, it would try to read and insert tuples into block 0 — THE META PAGE! That would corrupt the meta page by adding tuples to it.
+
+THIS IS THE BUG! In `mark_deleted`, when it scans from `HNSW_HEAD_BLKNO=1`, the first page where it finds a deleted element becomes `insert_page`. But `insert_page` is initialized to `pg_sys::InvalidBlockNumber` and the first page that has a deleted element sets `insert_page = blkno`. Since data pages start at block 1, the first valid `insert_page` should be >= 1.
+
+But wait, `insert_page` is set to the block number of the page, which is read from `blkno`, starting at `HNSW_HEAD_BLKNO=1`. So `insert_page` should never be 0.
+
+Unless... `insert_page` is set to 0 by `update_meta_page` which is called in `repair_graph`:
+
+● Read src/index/vacuum.rs lines 620-660
+  └ 41 lines read
+
+At line 637, `update_meta_page` is called with `insert_page = pg_sys::InvalidBlockNumber`. This is fine — it won't update insert_page.
+
+Let me look more carefully at what happens with insert_page after vacuum. Let me look at the whole insert path more carefully, specifically what happens when `insert_page=0`:
+
+Actually, let me re-examine the debug output. Line 422 shows the VACUUM reading `insert_page=0`. But the vacuum sets `insert_page` via `mark_deleted()` which scans from block 1. The `insert_page` in the meta page should have been set by the last operation that wrote to it.
+
+Wait — `insert_page` is set by `mark_deleted()` at the end:
+```rust
+if insert_page != pg_sys::InvalidBlockNumber {
+    update_meta_page(vs.index, 0, ..., insert_page);
+}
+```
+
+But `insert_page` is a local variable in `mark_deleted`, not `vs.insert_page`. It's initialized to `pg_sys::InvalidBlockNumber` and set to `blkno` when a deleted element is found. Since `blkno` starts at `HNSW_HEAD_BLKNO=1`, `insert_page` should be >= 1.
+
+Hold on. The debug output at line 422 shows `insert_page=0` is read from the meta page during vacuum round 1. This means before vacuum even starts, the meta page already has `insert_page=0`. But that can't be right because the initial meta page has `insert_page=InvalidBlockNumber` and the build/insert path only sets it to valid data page block numbers.
+
+Wait, let me re-check. Could it be that `insert_page` was set to 0 by some insert operation? Let me check get_insert_page and the insert flow:
+
+● Read src/index/insert.rs lines 1395-1470
+  └ 75 lines read
+
+At line 1457-1465: `update_meta_page` is called with `inserted.updated_insert_page`. This is only updated if `new_insert_page != insert_page` (see line 267). And `entry_mode=0` if entry doesn't need updating, in which case `should_update` is false in `update_meta_page`.
+
+But wait, at line 1451: `update_entry = entry_blkno == pg_sys::InvalidBlockNumber || new_level > entry_level`. For the very first insert after build (when entry_blkno is InvalidBlockNumber), `update_entry = true` and `entry_mode = HNSW_UPDATE_ENTRY_GREATER`. Then `update_meta_page` is called with `entry_blkno = inserted.blkno` and `entry_offno = inserted.offno`.
+
+Hmm, but that's correct. `inserted.blkno` would be 1 (the first data page), not 0.
+
+Wait, the debug log at line 422 shows `insert_page=0` being read. Looking back to where this is set: `insert_page=10` at lines 415-421, then suddenly `insert_page=0` at line 422.
+
+The change from `insert_page=10` to `insert_page=0` happens between the last insert of round 1 (PID 51633, insert_page=10) and the vacuum of round 1 (PID 51635, insert_page=0).
+
+But between these two, only a DELETE happens. DELETE doesn't modify the index's meta page. So `insert_page=0` must have been set by the last insert. Let me check if any insert sets `insert_page=0`:
+
+Actually, let me check what `hnsw_free_offset` returns:
+
+● Read src/index/insert.rs lines 105-190
+  └ 86 lines read
+
+OK, now I understand the flow. `add_element_on_disk` starts at `insert_page` and walks the page chain. Let me look at what happens when it reaches the end:
+
+● Read src/index/insert.rs lines 340-440
+  └ 101 lines read
+
+OK, I see the logic. But actually let me focus on the key issue: `insert_page=0` on the meta page. This value 0 is the METAPAGE_BLKNO! When the insert path reads this, it starts scanning from block 0 (the meta page). Let me look at what happens at line 209:
+
+```rust
+let buf = pg_sys::ReadBuffer(index, current_page);
+```
+
+If `current_page=0`, it reads the meta page. Then at line 213-215, it registers it with GenericXLog and checks free space. Since the meta page has some free space, it might try to add tuples to it, which would corrupt the meta data.
+
+So the question is: HOW does `insert_page` become 0 in the meta page?
+
+Let me check the build path where meta page gets its final `insert_page`:
+
+● Check insert_page in build.rs
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n "insert_page\|\.insert_page"
+  src/index/build.rs | head -20
+  └ 9 lines...
+
+● Read src/index/build.rs lines 670-690
+  └ 21 lines read
+
+OK, so build sets `insert_page` to the last page used for building. This is correct.
+
+Now let me trace the issue. After build, inserts happen. Each insert might update `insert_page` in the meta page. Let me look at what value `insert_page` could become:
+
+In `add_element_on_disk`, `new_insert_page` starts as `InvalidBlockNumber`. As the function walks pages, it tracks the first page with enough free space. Then `updated_insert_page` is set to `new_insert_page` if it differs from `insert_page`, otherwise `InvalidBlockNumber`.
+
+In the aminsert function, `updated_insert_page` is passed to `update_meta_page`. If it's `InvalidBlockNumber`, the meta page's insert_page is NOT updated.
+
+Wait, actually the issue is: what if the meta page's `insert_page` points to a page that exists, but during vacuum `mark_deleted`, `insert_page` local variable starts at `InvalidBlockNumber` and if no deleted elements are found, `update_meta_page` is NOT called (because `insert_page == InvalidBlockNumber` check at line 792).
+
+But if deleted elements ARE found, `insert_page` is set to the block containing the first deleted element. Then `update_meta_page` is called to update `insert_page` on the meta page.
+
+But the current meta page shows `insert_page=0`. Block 0 is the meta page. Where could this come from?
+
+Let me check: maybe `mark_deleted` scans the meta page? No, it starts at `HNSW_HEAD_BLKNO=1`.
+
+What if `hnsw_page_get_opaque(page).nextblkno` chains to block 0? That would be a bug in the page chain. Let me check:
+
+● Read src/index/vacuum.rs lines 780-800
+  └ 21 lines read
+
+Wait, the local `insert_page` in `mark_deleted` is NOT necessarily 0. Actually, the meta page shows `insert_page=0`, but the debug output at line 422 shows: `insert_page=0` being read from the meta page. This happens BEFORE vacuum starts (it's the first read of the vacuum process). So the meta page already had `insert_page=0` before vacuum started.
+
+So the question is: who set `insert_page=0` on the meta page? It must have been an insert operation. Let me check the debug output more carefully to see when `insert_page` transitioned from some value to 0:
+
+● Find first insert_page=0
+  $ grep "pgvector-rx DEBUG"
+  /var/folders/g6/ghvfrhk135x3w27vzccnchtm0000gn/T/copilot-tool-output-1771099664159-bwsosy.txt |
+  grep "insert_page=0[^0-9]" | head -5
+  └ 1 line...
+
+● Find first insert_page=0
+  $ grep "pgvector-rx DEBUG"
+  /var/folders/g6/ghvfrhk135x3w27vzccnchtm0000gn/T/copilot-tool-output-1771099664159-bwsosy.txt |
+  grep "insert_page=0\b" | head -5
+  └ 6 lines...
+
+Wait! These are from EARLY inserts (round 1). `entry_blkno=0` means the entry point is on block 0 (the meta page??), and `insert_page=0`. 
+
+But `entry_blkno=0` would mean the entry point is on the META PAGE! That's impossible. The first element should go to block 1 (HNSW_HEAD_BLKNO).
+
+Wait no — `entry_blkno=0` could be a legitimate data page block number if pages start at 0. But no, block 0 IS the meta page.
+
+Actually wait! Let me re-check. After building an empty index and the first INSERT, `update_meta_page` would set `entry_blkno = inserted.blkno`. Where is the first element placed? In `add_element_on_disk`, it starts at `insert_page` which is from `get_insert_page()`, which reads `(*metap).insert_page` from the meta page.
+
+After build of an empty table, `insert_page = InvalidBlockNumber` (0xFFFFFFFF). Then the first INSERT calls `get_insert_page()` → returns `InvalidBlockNumber`. Then `add_element_on_disk` starts with `current_page = InvalidBlockNumber`!
+
+Let me check what happens at line 209:
+```rust
+let buf = pg_sys::ReadBuffer(index, current_page);
+```
+
+If `current_page = InvalidBlockNumber (0xFFFFFFFF)`, `ReadBuffer` is called with block `0xFFFFFFFF`. That would... wait, in PostgreSQL, `ReadBuffer` with `P_NEW = InvalidBlockNumber` means "extend the relation by one block". Let me verify:
+
+● Check P_NEW definition
+  $ grep "P_NEW\|ReadBuffer"
+  /Users/maropu/.pgrx/18.2/pgrx-install/include/postgresql/server/storage/bufmgr.h | head -10
+  └ 11 lines...
+
+`P_NEW = InvalidBlockNumber`! So `ReadBuffer(index, InvalidBlockNumber)` extends the relation by one block. But wait, that means when `insert_page = InvalidBlockNumber`, the code will try to extend the relation. But the code at line 215 does `PageGetFreeSpace` on the new page. A new page from `ReadBuffer(P_NEW)` would be uninitialized!
+
+Actually, looking at the code flow more carefully:
+
+● Read src/index/insert.rs lines 208-270
+  └ 63 lines read
+
+Wait — when `current_page = InvalidBlockNumber`, `ReadBuffer(index, InvalidBlockNumber)` extends the relation. But this skips the proper initialization flow that should use `LockRelationForExtension`. Also, the new page is NOT initialized with `hnsw_init_page`!
+
+But actually, in C pgvector, the insert path uses `get_insert_page()` which reads the meta page's insert_page. In C, after build with 0 tuples, insert_page is also `InvalidBlockNumber`. Let me check the C code:
+
+● Check C insert_page handling
+  $ grep -n "GetInsertPage\|insertPage\|insert_page"
+  /Users/maropu/Repositories/pgvector-rx/references/pgvector/src/hnswinsert.c | head -20
+  └ 9 lines...
+
+● Check C AddElementOnDisk start
+  $ sed -n '139,160p' /Users/maropu/Repositories/pgvector-rx/references/pgvector/src/hnswinsert.c
+  └ 23 lines...
+
+● Check C page scanning logic
+  $ sed -n '195,250p' /Users/maropu/Repositories/pgvector-rx/references/pgvector/src/hnswinsert.c
+  └ 56 lines...
+
+I see — the C code uses `currentPage = insertPage` and then walks the chain. But when `insertPage` is `InvalidBlockNumber`, the C code would also call `ReadBuffer(index, InvalidBlockNumber)` which allocates a new page. But wait — is there a `BlockNumberIsValid(currentPage)` check before entering the loop?
+
+● Check C loop start
+  $ sed -n '175,200p' /Users/maropu/Repositories/pgvector-rx/references/pgvector/src/hnswinsert.c
+  └ 27 lines...
+
+OK, so the C code also does `ReadBuffer(index, currentPage)` where `currentPage` starts as `insertPage`. If `insertPage = InvalidBlockNumber = P_NEW`, it would allocate a new page. But wait, a newly extended page via `ReadBuffer(P_NEW)` is basically an empty page. It would have full free space and the tuples would be added there. The page initialization is... hmm.
+
+Actually, now I realize: in C pgvector, after building an empty table, the meta page's `insertPage` is set. Let me check:
+
+● Check C build's insert_page handling
+  $ grep -n "insertPage\|insert_page\|initForkPage"
+  /Users/maropu/Repositories/pgvector-rx/references/pgvector/src/hnswbuild.c | head -30
+  └ 5 lines...
+
+● Check C build finalization
+  $ sed -n '217,235p' /Users/maropu/Repositories/pgvector-rx/references/pgvector/src/hnswbuild.c
+  └ 20 lines...
+
+● Check C build for empty table
+  $ sed -n '135,155p' /Users/maropu/Repositories/pgvector-rx/references/pgvector/src/hnswbuild.c
+  └ 22 lines...
+
+● Check C build empty table handling
+  $ sed -n '155,185p' /Users/maropu/Repositories/pgvector-rx/references/pgvector/src/hnswbuild.c
+  └ 32 lines...
+
+So in C, when the table is empty, `CreateGraphPages` is called but the while loop body never executes (no elements). Then at line 224: `insertPage = BufferGetBlockNumber(buf)` — this is the first data page (block 1). So even for empty tables, `insertPage` is set to block 1.
+
+But in our Rust build, what happens for empty tables?
+
+● Read src/index/build.rs lines 840-860
+  └ 21 lines read
+
+● Read src/index/build.rs lines 610-690
+  └ 81 lines read
+
+Now let me look at the beginning of `create_graph_pages`:
+
+● Read src/index/build.rs lines 542-615
+  └ 73 lines read
+
+At line 553: **When the table is empty, `create_graph_pages` returns `InvalidBlockNumber`**. Then at line 855, `update_meta_page(&bs, insert_page)` is called with `insert_page = InvalidBlockNumber`.
+
+● Read src/index/build.rs lines 770-800
+  └ 31 lines read
+
+At line 771: if `entry_point` is None (no elements), it returns early — doesn't update the meta page. So for empty tables, the meta page keeps `insert_page = InvalidBlockNumber`.
+
+But wait, the test creates the index on an EMPTY table, then inserts rows one by one. So the first insert has `insert_page = InvalidBlockNumber`. Then in `aminsert`, `get_insert_page()` returns `InvalidBlockNumber`. Then `add_element_on_disk` starts with `current_page = InvalidBlockNumber = P_NEW`.
+
+`ReadBuffer(index, P_NEW)` extends the relation. But at this point, the relation only has 1 block (the meta page, block 0). So extending creates block 1. But wait, the init fork already created block 0 (meta page). What about the head page?
+
+Let me check what happens during build:
+
+● Read src/index/build.rs lines 820-870
+  └ 51 lines read
+
+For empty tables:
+1. `create_meta_page` creates block 0 (meta page)
+2. `create_graph_pages` returns `InvalidBlockNumber` (empty)
+3. `update_meta_page` returns early (no entry point)
+
+So the relation has only 1 block (the meta page at block 0). meta page has `insert_page = InvalidBlockNumber`.
+
+But in C pgvector, `CreateGraphPages` ALWAYS creates a first data page even when there are no elements:
+
+```c
+// Prepare first page
+buf = HnswNewBuffer(index, forkNum);
+page = BufferGetPage(buf);
+HnswInitPage(buf, page);
+```
+
+This is done BEFORE the while loop. So even for empty tables, C pgvector creates a head page (block 1). And `insertPage = BufferGetBlockNumber(buf)` = 1.
+
+**FOUND THE BUG!** In our Rust code, `create_graph_pages` returns early when empty, not creating the head page. So:
+1. For empty tables, only block 0 (meta page) exists
+2. First INSERT calls `ReadBuffer(index, InvalidBlockNumber=P_NEW)` → creates block 1
+3. Block 1 is NOT initialized with `hnsw_init_page` → `hnsw_page_get_opaque(page)->nextblkno` is garbage
+4. The first element is placed on block 1
+
+But actually, `ReadBuffer(P_NEW)` returns a zero-initialized page (or at least an empty page). And then `GenericXLogRegisterBuffer` with flag 0 would... hmm. Let me think.
+
+Actually, the page from `ReadBuffer(P_NEW)` is NOT zero-initialized. It's whatever is in the buffer pool. And without `PageInit`, the page header is invalid. `PageGetFreeSpace` on such a page would return garbage.
+
+But wait, the test shows that round 1 inserts work fine (all 100 inserts succeed). So somehow it works. Maybe `ReadBuffer(P_NEW)` does zero the page?
+
+Actually, let me look more carefully. For the test scenario: CREATE TABLE (empty) → CREATE INDEX (builds empty index) → INSERT 100 rows (each calls aminsert).
+
+The first aminsert:
+1. `insert_page = InvalidBlockNumber` (from meta page)
+2. `add_element_on_disk(insert_page=InvalidBlockNumber)` → `current_page = InvalidBlockNumber`
+3. `ReadBuffer(index, InvalidBlockNumber)` → extends relation, creates block 1
+4. The new page is... well, `ReadBufferExtended` with `RBM_ZERO_AND_LOCK` would zero it, but `ReadBuffer` with P_NEW? 
+
+Hmm, in PostgreSQL, `ReadBuffer` with `P_NEW` uses `ReadBufferExtended` with `RBM_ZERO_AND_LOCK`. Let me check:
+
+● Check ReadBuffer definition
+  $ grep -A5 "ReadBuffer\b"
+  /Users/maropu/.pgrx/18.2/pgrx-install/include/postgresql/server/storage/bufmgr.h | head -10
+  └ 11 lines...
+
+OK, `ReadBuffer` is a separate function. In PostgreSQL 18, `ReadBuffer(reln, P_NEW)` would call `ReadBufferExtended(reln, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL)`. With `RBM_NORMAL` and `P_NEW`... actually, I'm not sure if this zeroes the page.
+
+But actually, this is beside the point. The main issue is simpler: after vacuum marks elements as deleted, the `mark_deleted` function at line 792 calls `update_meta_page` with `insert_page` set to the first block that has a deleted element. For an empty-table-then-insert scenario, this would be block 1. That's fine.
+
+But wait — the actual meta page corruption (m changing from 16 to various values) suggests that something is WRITING data to the meta page's content area, overwriting the `m` field.
+
+If `insert_page` in the meta page is ever 0 (HNSW_METAPAGE_BLKNO), then `add_element_on_disk` would read block 0 (the meta page) and try to add tuples to it! That would overwrite the meta page data.
+
+But who sets `insert_page=0` in the meta page? From my debug output, the VERY FIRST inserts after CREATE INDEX already show `insert_page=0` when `entry_blkno=0`. This means the very first insert set `entry_blkno=0` and `insert_page=0`.
+
+Wait, that can't be right. `entry_blkno=0` means the entry point element is on block 0 (the meta page). How?
+
+OK I think I see the issue. The first insert:
+1. `insert_page = InvalidBlockNumber` (from meta page for empty index)
+2. `add_element_on_disk(insert_page=InvalidBlockNumber)` → `ReadBuffer(index, InvalidBlockNumber)`
+3. This creates a NEW block. The block number would be... the next block after what exists. If only block 0 exists, this creates block 1.
+
+But wait! Look at the first insert's flow again. In `aminsert`:
+
+● Read src/index/insert.rs lines 1270-1320
+  └ 51 lines read
+
+At line 1291: for empty index, `entry_blkno = InvalidBlockNumber`.
+At line 1298: `entry_blkno == InvalidBlockNumber` is true → upgrade to exclusive lock.
+At line 1305: re-read meta page. Still `entry_blkno = InvalidBlockNumber`.
+At line 1312: skip neighbor finding.
+
+Then inserts the element:
+
+● Read src/index/insert.rs lines 1400-1470
+  └ 70 lines read
+
+Line 1405: `insert_page_blkno = get_insert_page()` → reads `InvalidBlockNumber` from meta page.
+Line 1411-1418: `add_element_on_disk(insert_page=InvalidBlockNumber)` → `ReadBuffer(index, P_NEW)` → creates block 1.
+
+But wait! The `add_element_on_disk` function first tries the current page. With a P_NEW page, `PageGetFreeSpace` on an uninitialized page... Actually, `GenericXLogRegisterBuffer(state, buf, 0)` returns the page, and since it's a newly allocated block, the page might not be initialized. `PageGetFreeSpace` on an uninitialized page would return garbage.
+
+Actually, let me check this more carefully. When `ReadBuffer(index, P_NEW)` creates a new block:
+1. The buffer is allocated in shared buffers
+2. The page content is... undefined? Or zero? 
+
+For PostgreSQL `P_NEW`, `ReadBuffer` should use `RBM_ZERO_AND_LOCK`:
+
+● Check ReadBuffer implementation
+  $ grep -B5 -A15 "^ReadBuffer\b" /Users/maropu/.pgrx/18.2/src/backend/storage/buffer/bufmgr.c
+  2>/dev/null | head -30
+  └ 22 lines...
+
+OK so `ReadBuffer(reln, P_NEW)` calls `ReadBufferExtended(reln, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL)`. With `RBM_NORMAL` and `P_NEW`... For P_NEW, PostgreSQL allocates a new buffer and zeroes it. So the page content is zero.
+
+A zero-filled page has `pd_lower = 0`. `PageGetFreeSpace` on a zero page returns... let me check:
+
+Actually, `PageGetFreeSpace` requires a valid page header. With `pd_lower = 0`, `pd_upper = 0`, it would likely return 0 (or assert-fail).
+
+But `PageGetFreeSpace` checks:
+```c
+space = (int) phdr->pd_upper - (int) phdr->pd_lower;
+if (space < (int) sizeof(ItemIdData))
+    return 0;
+```
+
+With `pd_upper = 0` and `pd_lower = 0`: `space = 0 - 0 = 0`, which is < `sizeof(ItemIdData)` = 4, so returns 0.
+
+So on the zero page, `free_space = 0`. Combined_size would be > 0, so the fast path at line 223 is skipped.
+
+Then it tries `hnsw_free_offset` on the zero page. The zero page has `maxoffno = 0` (because `pd_lower = 0` means no items). So `hnsw_free_offset` returns None.
+
+Then at line 348-427: The "split across pages" check. But `combined_size > max_size` might not be true, so it skips. 
+
+Then at line 429-434: `next_blkno = (*hnsw_page_get_opaque(page)).nextblkno`. On a zero page, the opaque area pointer is calculated as `page + pd_special`. With `pd_special = 0`, the opaque pointer would point to the START of the page! That's wrong. The `nextblkno` field would read from offset 0, which is `pd_lsn` (or part of it).
+
+Actually, wait. `hnsw_page_get_opaque` reads `(*header).pd_special` and adds it to the page pointer:
+
+```rust
+fn hnsw_page_get_opaque(page: pg_sys::Page) -> *mut HnswPageOpaqueData {
+    let header = page as *const pg_sys::PageHeaderData;
+    (page as *mut u8).add((*header).pd_special as usize) as *mut HnswPageOpaqueData
+}
+```
+
+For a zero page, `pd_special = 0`, so the opaque area points to the beginning of the page. `nextblkno` would be the first 4 bytes of the page, which is 0 (since the page is zeroed). So `nextblkno = 0`.
+
+Actually wait, `nextblkno = 0` means block 0, NOT `InvalidBlockNumber` (which is 0xFFFFFFFF). So the code continues to the next page at block 0 (the META PAGE!).
+
+Then the loop continues with `current_page = 0`:
+1. `ReadBuffer(index, 0)` → reads the META PAGE
+2. `GenericXLogRegisterBuffer(state, buf, 0)` → registers it for WAL
+3. `PageGetFreeSpace(meta_page)` → returns the free space on the meta page
+4. If there's enough space, IT ADDS TUPLES TO THE META PAGE!
+
+**THIS IS THE ROOT CAUSE!** When inserting into an empty index:
+1. `insert_page = InvalidBlockNumber` → P_NEW → creates a new zero page
+2. Zero page has `pd_special = 0` → opaque area at offset 0 → `nextblkno = 0`
+3. Loop follows to block 0 (META PAGE)
+4. Meta page has free space (only 52 bytes of header+meta used out of 8K)
+5. Tuples are added to the meta page, corrupting the meta data!
+
+**The fix**: In `create_graph_pages`, even for empty tables, we should create the initial data page (like C does). This ensures:
+1. Block 1 exists with a properly initialized HNSW page
+2. `insert_page` is set to block 1 (not InvalidBlockNumber)
+
+Let me fix this:
+
+● Read src/index/build.rs lines 546-575
+  └ 30 lines read
+
+Now I need to move the first page creation BEFORE the empty check, so even empty tables get a head page. Actually, it's cleaner to just remove the early return and let the function always create the first page:
+
+● Edit src/index/build.rs (+12 -8)
+
+Now I also need to update `update_meta_page` in build.rs to NOT skip the update when there's no entry point, since we now always have a valid insert_page:
+
+● Read src/index/build.rs lines 770-800
+  └ 31 lines read
+
+I need to remove the early return so that `insert_page` is always updated:
+
+● Edit src/index/build.rs (-4)
+
+Now I also need to add a safety check in `add_element_on_disk` to never try to insert into the meta page. Let me also check if `get_insert_page` can return `HNSW_METAPAGE_BLKNO`:
+
+Actually, with the build fix, `insert_page` in the meta page will always be >= 1 (HNSW_HEAD_BLKNO). But let me also add a safety check in `add_element_on_disk`:
+
+● Read src/index/insert.rs lines 201-215
+  └ 15 lines read
+
+Let me add a debug assertion that `current_page` is never the meta page:
+
+● Edit src/index/insert.rs (+4)
+
+Now let me also remove the debug logging from `scan.rs`:
+
+● Read src/index/scan.rs lines 139-160
+  └ 21 lines read
+
+● Edit src/index/scan.rs (-13)
+
+Now let me also remove the debug logging from vacuum.rs:
+
+● Find debug logging in vacuum.rs
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep -n
+  "debug\|DEBUG\|ntup_size.*old_len.*free_space.*level.*m=" src/index/vacuum.rs | head -10
+  └ 3 lines...
+
+● Read src/index/vacuum.rs lines 392-418
+  └ 27 lines read
+
+Let me simplify the error message (remove the excessive debug info but keep it informative enough):
+
+● Edit src/index/vacuum.rs (+5 -14)
+
+Now let me make sure the HNSW_METAPAGE_BLKNO constant is imported in insert.rs:
+
+● Check HNSW_METAPAGE_BLKNO import in insert.rs
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep "HNSW_METAPAGE_BLKNO" src/index/insert.rs
+  └ 4 lines...
+
+● Check import
+  $ cd /Users/maropu/Repositories/pgvector-rx && grep "use.*HNSW_METAPAGE" src/index/insert.rs
+  └ 1 line...
+
+● Check insert.rs imports
+  $ cd /Users/maropu/Repositories/pgvector-rx && head -20 src/index/insert.rs
+  └ 21 lines...
+
+Good, `HNSW_METAPAGE_BLKNO` is imported via `crate::hnsw_constants::*`. Now let me build and test:
+
+● Check compilation
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo check --no-default-features --features pg18
+  2>&1 | tail -10
+  └ 3 lines...
+
+Good, compiles. Now let me install and test the 038 test:
+
+● Install extension
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx install --pg-config
+  /Users/maropu/.pgrx/18.2/pgrx-install/bin/pg_config --release 2>&1 | tail -3
+  └ 4 lines...
+
+● Run 038 test
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl prove -v
+  tests/t/038_hnsw_sparsevec_vacuum_insert.pl 2>&1
+  └ 11 lines...
+
+Test 038 passes! Now let me run all 5 sparsevec TAP tests:
+
+● Run all 5 sparsevec TAP tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl prove -v
+  tests/t/028_hnsw_sparsevec_build_recall.pl tests/t/029_hnsw_sparsevec_insert_recall.pl ...
+  └ 68 lines...
+
+All 5 sparsevec TAP tests pass (42/42 assertions). Now let me run the existing tests to make sure there's no regression. Let me run all pgrx tests first:
+
+● Run pgrx tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo pgrx test pg18 2>&1 | tail -20
+  └ 20 lines...
+
+All 120 pgrx tests pass. Now let me run the existing TAP tests (vector, halfvec, bitvec) to check for regressions:
+
+● Run key vector TAP tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl prove -v tests/t/010_hnsw_wal.pl
+  tests/t/012_hnsw_vector_build_recall.pl tests/t/014_hnsw_vector_vacuum_recall.pl ...
+  └ 76 lines...
+
+The 016 test file doesn't exist. Let me check the existing tests:
+
+● List available TAP tests
+  $ ls /Users/maropu/Repositories/pgvector-rx/tests/t/ | sort
+  └ 27 lines...
+
+It's `016_hnsw_inserts.pl`, not `016_hnsw_vector_inserts.pl`. The 3 key tests (010, 012, 014) already passed. Let me run the remaining vector tests plus the 011 vacuum test (which was previously known to fail on space reuse):
+
+● Run remaining vector TAP tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl prove -v tests/t/011_hnsw_vacuum.pl
+  tests/t/013_hnsw_vector_insert_recall.pl tests/t/015_hnsw_vector_duplicates.pl ...
+  └ 136 lines...
+
+● read_bash
+  └ tests/t/011_hnsw_vacuum.pl .................
+
+All tests pass. 011 vacuum even passes now (space reuse works!). The build fix also fixed that known pre-existing issue. Let me run the remaining TAP tests (bit, halfvec):
+
+● Run bit and halfvec TAP tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl prove -v tests/t/020_hnsw_bit_build_recall.pl
+  tests/t/021_hnsw_bit_insert_recall.pl tests/t/022_hnsw_bit_vacuum_recall.pl ...
+  └ 62 lines...
+
+● read_bash
+  └ tests/t/020_hnsw_bit_build_recall.pl .......
+
+All 62 assertions across 8 bit/halfvec tests pass. Let me also check the 017 filtering and 039 cost tests:
+
+● Run filtering and cost tests
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check &&
+  PATH=/Users/maropu/.pgrx/18.2/pgrx-install/bin:$PATH
+  PG_REGRESS=/Users/maropu/.pgrx/18.2/src/test/regress/pg_regress
+  PERL5LIB=/Users/maropu/.pgrx/18.2/src/test/perl prove -v tests/t/017_hnsw_filtering.pl
+  tests/t/039_hnsw_cost.pl 2>&1
+  └ 21 lines...
+
+● read_bash
+  └ tests/t/017_hnsw_filtering.pl ..
+
+● read_bash
+  └ tests/t/017_hnsw_filtering.pl ..
+
+● read_bash
+  └ tests/t/017_hnsw_filtering.pl ..
+
+● read_bash
+  └ tests/t/017_hnsw_filtering.pl ..
+
+● read_bash
+  └ tests/t/017_hnsw_filtering.pl ..
+
+● read_bash
+  └ tests/t/017_hnsw_filtering.pl ..
+
+● read_bash
+  └ tests/t/017_hnsw_filtering.pl ..
+
+039 cost test is slow. Let me keep waiting:
+
+● read_bash
+  └ tests/t/017_hnsw_filtering.pl ..
+
+● read_bash
+  └ tests/t/017_hnsw_filtering.pl ..
+
+017 filtering now passes (14/14) and 039 cost passes (4/4). These were previously known to fail! The build fix fixed them too.
+
+Let me update the memory about known test failures since they've been resolved:
+
+● store_memory
+  └ Memory stored successfully.
+
+● store_memory
+  └ Memory stored successfully.
+
+Now let me run `cargo fmt` and `cargo clippy`:
+
+● Format and lint
+  $ cd /Users/maropu/Repositories/pgvector-rx && cargo fmt && cargo clippy --no-default-features
+  --features pg18 -- -D warnings 2>&1 | tail -10
+  └ 3 lines...
+
+Clean. Let me also clean up the temp files:
+
+● Clean up temp files
+  $ cd /Users/maropu/Repositories/pgvector-rx && rm -rf tmp_check log && rm -f
+  /tmp/test_038_debug.pl /tmp/test_038_debug2.pl
+  └ 1 line...
+
+Now let me check the 038 test file to make sure it's not in the git ignore:
+
+● Check git status
+  $ cd /Users/maropu/Repositories/pgvector-rx && git status
+  └ 23 lines...
+
+Let me look at the diff summary:
+
+● Check diff stats
+  $ cd /Users/maropu/Repositories/pgvector-rx && git --no-pager diff --stat
+  └ 7 lines...
+
+Let me do a quick review of the changes before committing:
+
+● Review build.rs changes
+  $ cd /Users/maropu/Repositories/pgvector-rx && git --no-pager diff src/index/build.rs | head -80
+  └ 81 lines...
+
+● Review rest of build.rs changes
+  $ cd /Users/maropu/Repositories/pgvector-rx && git --no-pager diff src/index/build.rs | tail -100
+  └ 101 lines...
+
+Good. Now let me commit. First let me check what issue to reference:
+
+● Check open issues
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh issue list --state open --limit 10 2>/dev/null
+  └ 11 lines...
+
+This work relates to Phase 1 (data types - sparsevec), Phase 3 (build fix), and Phase 7 (testing). Let me commit:
+
+● Stage all changes
+  $ cd /Users/maropu/Repositories/pgvector-rx && git add -A && git status
+  └ 17 lines...
+
+● Commit changes
+  $ cd /Users/maropu/Repositories/pgvector-rx && git commit -m "[#1,#8] Implement sparsevec type
+  and fix empty-index build bug
+
+  Add complete sparsevec (sparse vector) type with HNSW index support:
+  - I/O functions (text, binary), casts (vector, halfvec, array)...
+  └ 35 lines...
+
+● Push to remote
+  $ cd /Users/maropu/Repositories/pgvector-rx && git push origin master 2>&1
+  └ 10 lines...
+
+Pushed. Now let me wait for CI to start and monitor it:
+
+● Check CI status
+  $ sleep 30 && cd /Users/maropu/Repositories/pgvector-rx && gh run list --limit 3 2>/dev/null
+  └ 5 lines...
+
+CI is running. Let me wait for it to complete:
+
+● Watch CI run
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh run watch 22024625533 2>&1
+  └ 9 lines...
+
+● Check CI result
+  $ tail -10
+  /var/folders/g6/ghvfrhk135x3w27vzccnchtm0000gn/T/copilot-tool-output-1771105123766-8eurdk.txt
+  └ 10 lines...
+
+CI passes. Let me update the GitHub issues:
+
+● Update issue #1
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh issue comment 1 -b "✅ Sparsevec type
+  implemented in commit 521ccc7. Full type implementation with I/O, casts, distance functions, and
+  HNSW operator classes. Refs Phase 1 data types." 2>/dev/null
+  └ 2 lines...
+
+● Update issue #8
+  $ cd /Users/maropu/Repositories/pgvector-rx && gh issue comment 8 -b "✅ All 24/24 TAP tests now
+   pass (302 total assertions) after commit 521ccc7.
+
+  Changes in this commit:
+  - Implemented sparsevec type with HNSW support (5 new TAP tests: 028-031, 038)...
+  └ 8 lines...
+
+
+Total usage est:        3 Premium requests
+API time spent:         38m 31.95s
+Total session time:     2h 18m 31.948s
+Total code changes:     +2422 -206
+Breakdown by AI model:
+ claude-opus-4.6         35.3m in, 126.3k out, 34.4m cached (Est. 3 Premium requests)
