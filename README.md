@@ -1,11 +1,12 @@
+[![Build and test](https://github.com/maropu/pgvector-rx/actions/workflows/BuildAndTest.yml/badge.svg)](https://github.com/maropu/pgvector-rx/actions/workflows/BuildAndTest.yml)
+[![Prebuilt binaries](https://github.com/maropu/pgvector-rx/actions/workflows/Distribution.yml/badge.svg)](https://github.com/maropu/pgvector-rx/actions/workflows/Distribution.yml)
+
 # pgvector-rx
 
 A Rust implementation of the [pgvector](https://github.com/pgvector/pgvector) HNSW index for PostgreSQL 18, built with [pgrx](https://github.com/pgcentralfoundation/pgrx).
 
 > **Experimental Project Notice**
-> This repository was generated as an evaluation of autonomous AI-driven code migration capabilities. It is **not intended for production use**. The entire HNSW implementation was autonomously ported from [pgvector v0.8.1](https://github.com/pgvector/pgvector/tree/v0.8.1) using GitHub Copilot CLI with Claude Opus 4.6 as the autonomous coding agent. The complete migration—from initial setup to passing all 28 HNSW test suites—was accomplished in approximately **13 hours of agent runtime**, consuming roughly **36% of Copilot's monthly Premium Request quota**.
-
-[![Build and test](https://github.com/maropu/pgvector-rx/actions/workflows/ci.yml/badge.svg)](https://github.com/maropu/pgvector-rx/actions/workflows/ci.yml)
+> This repository was generated as an evaluation of autonomous AI-driven code migration capabilities. It is **not intended for production use**. This project began with an interactive collaboration phase using Claude Sonnet 4.5 to establish the foundation. During this phase, three critical documents were generated: [.github/copilot-instructions.md](.github/copilot-instructions.md) containing coding standards and pgrx/HNSW-specific guidelines, [DESIGNDOC.md](DESIGNDOC.md) outlining a comprehensive 7-phase migration roadmap and architecture documentation, and [AGENT_PROMPT.md](AGENT_PROMPT.md) defining the autonomous agent's workflow instructions. Once the scaffolding was complete, the migration roadmap in DESIGNDOC.md was systematically broken down into granular GitHub Issues, with each Issue representing a single, well-scoped implementation unit. Finally, [run_agent.sh](run_agent.sh) was executed to launch an autonomous loop where Claude Opus 4.6 iteratively processed each Issue—reading context, implementing solutions, running tests, committing changes, and verifying CI—until all tasks were completed. The entire HNSW implementation (approximately 5,000 lines of C code) was autonomously ported from [pgvector v0.8.1](https://github.com/pgvector/pgvector/tree/v0.8.1), and the complete migration—from initial setup to passing all 28 HNSW test suites—was accomplished in approximately **13 hours of agent runtime**, consuming roughly **36% of Copilot's monthly Premium Request quota**.
 
 ## Overview
 
