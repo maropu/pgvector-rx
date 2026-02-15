@@ -1,0 +1,198 @@
+name: Prebuilt binaries (linux/amd64 and osx/arm64)
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  PG_MAJOR: "18"
+  PGRX_VERSION: "0.17.0"
+
+jobs:
+  # ===== Linux (linux/amd64) build =====
+  build-linux:
+    name: Linux (amd64)
+    runs-on: ubuntu-latest
+
+    container:
+      image: postgres:18-bookworm
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show effective parameters
+        run: |
+          echo "PG_MAJOR=$PG_MAJOR"
+          echo "PGRX_VERSION=$PGRX_VERSION"
+          echo "Base image: postgres:18-bookworm"
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            postgresql-server-dev-$PG_MAJOR \
+            ca-certificates \
+            git \
+            curl \
+            pkg-config \
+            libssl-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-pgrx
+        run: |
+          set -eux
+          cargo install cargo-pgrx --locked --version $PGRX_VERSION
+
+      - name: Initialize pgrx
+        run: |
+          set -eux
+          cargo pgrx init --pg$PG_MAJOR $(which pg_config)
+
+      - name: Build extension package
+        run: |
+          set -eux
+          cargo pgrx package --pg-config $(which pg_config) --features pg$PG_MAJOR --no-default-features
+
+      - name: Compute artifact name (linux)
+        id: meta
+        run: |
+          set -eux
+          VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          name="pgvector-rx-${VERSION}-pg${PG_MAJOR}-linux-amd64"
+          echo "ARTIFACT_NAME=${name}" >> "$GITHUB_ENV"
+          echo "artifact_name=${name}" >> "$GITHUB_OUTPUT"
+
+      - name: Collect installed files as artifact
+        id: collect
+        run: |
+          set -eux
+
+          # Find the package output directory
+          PACKAGE_DIR=$(find target -type d -name "pgvector_rx-pg${PG_MAJOR}" | head -1)
+          if [ -z "$PACKAGE_DIR" ]; then
+            echo "ERROR: Package directory not found" >&2
+            find target -name "*.so" -o -name "*.control" -o -name "*.sql" || true
+            exit 1
+          fi
+
+          mkdir -p artifact/lib artifact/extension
+
+          # Copy shared library
+          find "$PACKAGE_DIR" -name "*.so" -exec cp {} artifact/lib/ \;
+
+          # Copy extension files
+          find "$PACKAGE_DIR" -name "*.control" -exec cp {} artifact/extension/ \;
+          find "$PACKAGE_DIR" -name "*.sql" -exec cp {} artifact/extension/ \;
+
+          # Create tarball
+          tar -C artifact -czf "${ARTIFACT_NAME}.tar.gz" .
+          echo "tarpath=${ARTIFACT_NAME}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact (tarball)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}
+          path: ${{ steps.collect.outputs.tarpath }}
+
+  # ===== macOS (osx/arm64) build on Apple Silicon runner =====
+  build-macos-arm64:
+    name: macOS (arm64)
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show effective parameters
+        run: |
+          echo "PG_MAJOR=$PG_MAJOR"
+          echo "PGRX_VERSION=$PGRX_VERSION"
+          echo "Runner: macOS Apple Silicon (arm64)"
+
+      - name: Install PostgreSQL via Homebrew (Apple Silicon)
+        run: |
+          set -eux
+          brew update
+          brew install "postgresql@${PG_MAJOR}"
+          BREW_PREFIX="$(brew --prefix postgresql@${PG_MAJOR})"
+          echo "BREW_PREFIX=${BREW_PREFIX}"
+          echo "${BREW_PREFIX}/bin" >> $GITHUB_PATH
+
+      - name: Verify toolchain and pg_config
+        run: |
+          set -eux
+          which clang || true
+          which make
+          which pg_config
+          pg_config --version
+          pg_config --pkglibdir
+          pg_config --sharedir
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-pgrx
+        run: |
+          set -eux
+          cargo install cargo-pgrx --locked --version $PGRX_VERSION
+
+      - name: Initialize pgrx
+        run: |
+          set -eux
+          cargo pgrx init --pg$PG_MAJOR $(which pg_config)
+
+      - name: Build extension package (macOS arm64)
+        run: |
+          set -eux
+          cargo pgrx package --pg-config $(which pg_config) --features pg$PG_MAJOR --no-default-features
+
+      - name: Compute artifact name (osx-arm64)
+        id: meta
+        run: |
+          set -eux
+          VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          name="pgvector-rx-${VERSION}-pg${PG_MAJOR}-osx-arm64"
+          echo "ARTIFACT_NAME=${name}" >> "$GITHUB_ENV"
+          echo "artifact_name=${name}" >> "$GITHUB_OUTPUT"
+
+      - name: Collect installed files as artifact (handles .so or .dylib)
+        id: collect
+        run: |
+          set -eux
+
+          # Find the package output directory
+          PACKAGE_DIR=$(find target -type d -name "pgvector_rx-pg${PG_MAJOR}" | head -1)
+          if [ -z "$PACKAGE_DIR" ]; then
+            echo "ERROR: Package directory not found" >&2
+            find target -name "*.dylib" -o -name "*.so" -o -name "*.control" -o -name "*.sql" || true
+            exit 1
+          fi
+
+          mkdir -p artifact/lib artifact/extension
+
+          # Copy shared library (either .dylib or .so)
+          find "$PACKAGE_DIR" -name "*.dylib" -exec cp {} artifact/lib/ \; || true
+          find "$PACKAGE_DIR" -name "*.so" -exec cp {} artifact/lib/ \; || true
+
+          # Copy extension files
+          find "$PACKAGE_DIR" -name "*.control" -exec cp {} artifact/extension/ \;
+          find "$PACKAGE_DIR" -name "*.sql" -exec cp {} artifact/extension/ \;
+
+          # Create tarball
+          tar -C artifact -czf "${ARTIFACT_NAME}.tar.gz" .
+          echo "tarpath=${ARTIFACT_NAME}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact (tarball)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}
+          path: ${{ steps.collect.outputs.tarpath }}
