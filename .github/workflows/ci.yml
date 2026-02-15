@@ -1,4 +1,4 @@
-name: CI
+name: Build and test
 
 on:
   push:
@@ -10,11 +10,11 @@ jobs:
   test:
     name: Test on PostgreSQL 18
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-    
+
     - name: Install system dependencies
       run: |
         sudo apt-get update
@@ -32,10 +32,10 @@ jobs:
           ccache \
           pkg-config \
           libicu-dev
-    
+
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
-    
+
     - name: Cache Rust dependencies
       uses: actions/cache@v4
       with:
@@ -48,13 +48,13 @@ jobs:
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
           ${{ runner.os }}-cargo-
-    
+
     - name: Install cargo-pgrx
       run: |
         if ! cargo pgrx --version 2>/dev/null | grep -q "0.17.0"; then
           cargo install cargo-pgrx --locked --version 0.17.0 --force
         fi
-    
+
     - name: Cache pgrx PostgreSQL installation
       uses: actions/cache@v4
       with:
@@ -62,15 +62,15 @@ jobs:
         key: ${{ runner.os }}-pgrx-pg18-0.17.0
         restore-keys: |
           ${{ runner.os }}-pgrx-pg18-
-    
+
     - name: Initialize pgrx with PostgreSQL 18
       run: |
         cargo pgrx init --pg18 download
-    
+
     - name: Build extension
       run: |
         cargo build --release --features pg18 --no-default-features
-    
+
     - name: Run tests and verify extension loading
       run: |
         # This command builds the extension, installs it,

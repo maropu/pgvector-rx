@@ -2,7 +2,10 @@
 
 A Rust implementation of the [pgvector](https://github.com/pgvector/pgvector) HNSW index for PostgreSQL 18, built with [pgrx](https://github.com/pgcentralfoundation/pgrx).
 
-[![CI](https://github.com/maropu/pgvector-rx/actions/workflows/ci.yml/badge.svg)](https://github.com/maropu/pgvector-rx/actions/workflows/ci.yml)
+> **Experimental Project Notice**
+> This repository was generated as an evaluation of autonomous AI-driven code migration capabilities. It is **not intended for production use**. The entire HNSW implementation was autonomously ported from [pgvector v0.8.1](https://github.com/pgvector/pgvector/tree/v0.8.1) using GitHub Copilot CLI with Claude Opus 4.6 as the autonomous coding agent. The complete migration—from initial setup to passing all 28 HNSW test suites—was accomplished in approximately **13 hours of agent runtime**, consuming roughly **36% of Copilot's monthly Premium Request quota**.
+
+[![Build and test](https://github.com/maropu/pgvector-rx/actions/workflows/ci.yml/badge.svg)](https://github.com/maropu/pgvector-rx/actions/workflows/ci.yml)
 
 ## Overview
 
@@ -137,9 +140,9 @@ cargo pgrx run pg18
 | `hnsw.max_scan_tuples` | 20,000 | 1–2³¹ | Max tuples for iterative scan |
 | `hnsw.scan_mem_multiplier` | 1.0 | 1–1,000 | Memory multiplier for iterative scan |
 
-## Architecture
+## Migration Design
 
-See [DESIGNDOC.md](DESIGNDOC.md) for the full architecture and implementation plan.
+See [DESIGNDOC.md](DESIGNDOC.md) for the detailed C-to-Rust migration strategy, 7-phase roadmap, and implementation guidelines.
 
 ```
 src/
@@ -166,12 +169,7 @@ src/
 
 This implementation covers **sequential HNSW index building** only. Parallel build support is out of scope.
 
-## License
-
-This project is for experimental and educational purposes.
-
 ## Acknowledgements
 
 - [pgvector](https://github.com/pgvector/pgvector) by Andrew Kane — the original C implementation
 - [pgrx](https://github.com/pgcentralfoundation/pgrx) — Rust framework for PostgreSQL extensions
-- Based on the HNSW paper: "Efficient and robust approximate nearest neighbor search using Hierarchical Navigable Small World graphs" (Malkov & Yashunin, 2018)
