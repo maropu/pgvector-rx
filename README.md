@@ -52,20 +52,11 @@ pgvector-rx ports the HNSW (Hierarchical Navigable Small World) vector index fro
 # Install cargo-pgrx
 cargo install cargo-pgrx --locked --version 0.17.0
 
-# Initialize pgrx with PostgreSQL 18 (this will take some time to download and compile)
+# Initialize pgrx with PostgreSQL 18 (this will download and compile PostgreSQL 18)
 cargo pgrx init --pg18 download
 
-# Build and install the extension (specify pg_config for PostgreSQL 18)
-cargo pgrx install --release \
-  -c ~/.pgrx/18.2/pgrx-install/bin/pg_config \
-  --features pg18 --no-default-features
-```
-
-**Note:** If you have an existing PostgreSQL 18 installation, you can use its `pg_config` instead:
-```bash
-cargo pgrx install --release \
-  -c /path/to/your/pg18/bin/pg_config \
-  --features pg18 --no-default-features
+# Build and install the extension
+cargo pgrx install --release
 ```
 
 ## Usage
