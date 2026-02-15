@@ -82,8 +82,8 @@ jobs:
 
     - name: Run PostgreSQL TAP tests
       run: |
-        # Install the extension
-        cargo pgrx install --release
+        # Install the extension using pgrx-managed PostgreSQL 18
+        cargo pgrx install --release --pg-config ~/.pgrx/18.2/pgrx-install/bin/pg_config
 
         # Run TAP tests
         cd tests
