@@ -2,9 +2,9 @@ name: Build and test
 
 on:
   push:
-    branches: [ master, main ]
+    branches: [ master ]
   pull_request:
-    branches: [ master, main ]
+    branches: [ master ]
 
 jobs:
   test:
@@ -31,7 +31,9 @@ jobs:
           xsltproc \
           ccache \
           pkg-config \
-          libicu-dev
+          libicu-dev \
+          perl \
+          libipc-run-perl
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -69,11 +71,21 @@ jobs:
 
     - name: Build extension
       run: |
-        cargo build --release --features pg18 --no-default-features
+        cargo build --release
 
-    - name: Run tests and verify extension loading
+    - name: Run Rust tests
       run: |
         # This command builds the extension, installs it,
         # starts PostgreSQL, runs tests including extension loading,
         # and stops PostgreSQL automatically
         cargo pgrx test pg18
+
+    - name: Run PostgreSQL TAP tests
+      run: |
+        # Install the extension
+        cargo pgrx install --release
+
+        # Run TAP tests
+        cd tests
+        chmod +x run_tap_tests.sh
+        ./run_tap_tests.sh
